@@ -1,3 +1,7 @@
-# Settings and API keys — loaded from environment variables or .env file.
-# DEEPGRAM_API_KEY — required for live transcription.
-# No AI keys yet — detection is dictionary-only for now.
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+DEEPGRAM_API_KEY = os.environ["DEEPGRAM_API_KEY"]
