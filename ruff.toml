@@ -1,0 +1,13 @@
+target-version = "py312"
+line-length = 88
+
+[lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort (import sorting)
+    "UP",  # pyupgrade (modernize syntax)
+]
+
+[format]
+quote-style = "double"

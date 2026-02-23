@@ -5,13 +5,16 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "lint": "biome check .",
+    "format": "biome check --write ."
   },
   "dependencies": {
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.4.4",
     "@vitejs/plugin-react": "^4.5.2",
     "vite": "^6.3.5"
   }

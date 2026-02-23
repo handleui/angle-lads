@@ -21,5 +21,8 @@ dist/
 .DS_Store
 Thumbs.db
 
+# Turbo
+.turbo/
+
 # Env
 .env

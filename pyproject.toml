@@ -1,0 +1,11 @@
+[project]
+name = "angle-lads"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "deepgram-sdk>=5.3.2",
+    "fastapi>=0.131.0",
+    "pillow>=12.1.1",
+    "pyaudio>=0.2.14",
+    "uvicorn>=0.41.0",
+]
