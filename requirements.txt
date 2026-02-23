@@ -1,0 +1,5 @@
+deepgram-sdk
+pyaudio
+Pillow
+fastapi
+uvicorn
