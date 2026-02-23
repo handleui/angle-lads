@@ -5,24 +5,22 @@ __pycache__/
 dist/
 build/
 .venv/
-venv/
-env/
+.ruff_cache/
 *.egg
 
 # Node
 node_modules/
-dist/
 
 # IDE
 .vscode/
 .idea/
 
+# AI
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db
-
-# Turbo
-.turbo/
 
 # Env
 .env
