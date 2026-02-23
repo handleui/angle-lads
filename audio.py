@@ -6,10 +6,10 @@ FORMAT = pyaudio.paInt16
 CHUNK = 4096
 
 
-def stream(callback, stop_event=None):
-    """Open microphone and call callback(data) for each audio chunk.
+def stream():
+    """Open microphone and yield raw audio chunks.
 
-    Blocks until stop_event is set or KeyboardInterrupt.
+    Yields bytes until KeyboardInterrupt.
     """
     p = pyaudio.PyAudio()
     mic = p.open(
@@ -20,9 +20,8 @@ def stream(callback, stop_event=None):
         frames_per_buffer=CHUNK,
     )
     try:
-        while stop_event is None or not stop_event.is_set():
-            data = mic.read(CHUNK, exception_on_overflow=False)
-            callback(data)
+        while True:
+            yield mic.read(CHUNK, exception_on_overflow=False)
     except KeyboardInterrupt:
         pass
     finally:

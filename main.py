@@ -12,15 +12,14 @@ import transcriber
 
 RESET = "\033[0m"
 GEN_COLORS = {
-    "gen_z": "\033[94m",      # blue
-    "millennial": "\033[95m",  # magenta
-    "boomer": "\033[93m",      # yellow
-    "regional": "\033[96m",    # cyan
+    "gen_z": "\033[94m",
+    "millennial": "\033[95m",
+    "boomer": "\033[93m",
+    "regional": "\033[96m",
 }
 
 clients: set[WebSocket] = set()
 loop: asyncio.AbstractEventLoop | None = None
-dg_connection = None
 
 
 async def broadcast(message: dict):
@@ -51,26 +50,20 @@ def on_transcript(text: str, is_final: bool):
     asyncio.run_coroutine_threadsafe(broadcast(msg), loop)
 
 
-def audio_thread():
-    if dg_connection is None:
-        return
-    audio.stream(dg_connection.send)
+def pipeline_thread():
+    """Run mic → Deepgram → detection in a blocking thread."""
+    transcriber.run(on_transcript, audio.stream)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global loop, dg_connection
+    global loop
     loop = asyncio.get_running_loop()
 
-    dg_connection = transcriber.connect(on_transcript)
-
-    mic = threading.Thread(target=audio_thread, daemon=True)
-    mic.start()
+    t = threading.Thread(target=pipeline_thread, daemon=True)
+    t.start()
 
     yield
-
-    if dg_connection:
-        dg_connection.finish()
 
 
 app = FastAPI(lifespan=lifespan)
