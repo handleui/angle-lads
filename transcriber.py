@@ -22,7 +22,7 @@ def connect(on_transcript):
 
     options = LiveOptions(
         model="nova-3",
-        language="en-US",
+        language="es",
         encoding="linear16",
         sample_rate=16000,
         channels=1,

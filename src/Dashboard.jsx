@@ -1,5 +1,41 @@
 import { useEffect, useRef, useState } from "react";
 
+const GEN_COLORS = {
+  gen_z: "#0070f3",
+  millennial: "#7928ca",
+  boomer: "#f5a623",
+  regional: "#50e3c2",
+};
+
+function renderText(text, flags) {
+  if (!flags || flags.length === 0) return text;
+
+  const parts = [];
+  let cursor = 0;
+
+  for (const flag of flags) {
+    if (flag.start > cursor) {
+      parts.push(text.slice(cursor, flag.start));
+    }
+    parts.push(
+      <span
+        key={flag.start}
+        style={flagged(flag.generation)}
+        title={`${flag.term}: ${flag.definition}`}
+      >
+        {text.slice(flag.start, flag.end)}
+      </span>,
+    );
+    cursor = flag.end;
+  }
+
+  if (cursor < text.length) {
+    parts.push(text.slice(cursor));
+  }
+
+  return parts;
+}
+
 export function Dashboard() {
   const [lines, setLines] = useState([]);
   const [interim, setInterim] = useState("");
@@ -18,7 +54,7 @@ export function Dashboard() {
       const msg = JSON.parse(e.data);
       if (msg.type === "final") {
         const id = nextId.current++;
-        setLines((prev) => [...prev, { id, text: msg.text }]);
+        setLines((prev) => [...prev, { id, text: msg.text, flags: msg.flags }]);
         setInterim("");
       } else {
         setInterim(msg.text);
@@ -46,7 +82,7 @@ export function Dashboard() {
       </header>
       <div style={transcript}>
         {lines.map((line) => (
-          <span key={line.id}>{line.text} </span>
+          <span key={line.id}>{renderText(line.text, line.flags)} </span>
         ))}
         {interim && <span style={ghost}>{interim}</span>}
         <div ref={endRef} />
@@ -93,3 +129,8 @@ const transcript = {
 const ghost = {
   color: "#ccc",
 };
+
+const flagged = (generation) => ({
+  borderBottom: `2px solid ${GEN_COLORS[generation] || "#999"}`,
+  cursor: "help",
+});

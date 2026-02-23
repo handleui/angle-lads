@@ -7,7 +7,16 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 import audio
+import detector
 import transcriber
+
+RESET = "\033[0m"
+GEN_COLORS = {
+    "gen_z": "\033[94m",      # blue
+    "millennial": "\033[95m",  # magenta
+    "boomer": "\033[93m",      # yellow
+    "regional": "\033[96m",    # cyan
+}
 
 clients: set[WebSocket] = set()
 loop: asyncio.AbstractEventLoop | None = None
@@ -28,7 +37,17 @@ async def broadcast(message: dict):
 def on_transcript(text: str, is_final: bool):
     if loop is None:
         return
-    msg = {"type": "final" if is_final else "interim", "text": text}
+
+    flags = detector.scan(text) if is_final else []
+
+    for flag in flags:
+        color = GEN_COLORS.get(flag["generation"], "")
+        print(
+            f"{color}[{flag['generation']}]{RESET} "
+            f"{flag['term']} → {flag['definition']}"
+        )
+
+    msg = {"type": "final" if is_final else "interim", "text": text, "flags": flags}
     asyncio.run_coroutine_threadsafe(broadcast(msg), loop)
 
 
