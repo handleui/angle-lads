@@ -1,3 +1,5 @@
+import threading
+
 from deepgram import DeepgramClient
 from deepgram.core.events import EventType
 from deepgram.extensions.types.sockets.listen_v1_results_event import (
@@ -15,8 +17,6 @@ def run(on_transcript, audio_chunks):
 
     This function blocks — run it in a thread.
     """
-    # Wait for the first chunk so the mic is fully open (permission prompt, etc.)
-    # before we connect to Deepgram and start its timeout clock.
     first = next(audio_chunks)
 
     client = DeepgramClient(api_key=config.DEEPGRAM_API_KEY)
@@ -41,9 +41,12 @@ def run(on_transcript, audio_chunks):
             on_transcript(text, message.is_final)
 
         conn.on(EventType.MESSAGE, handle)
-        conn.start_listening()
 
-        # Send the buffered first chunk, then stream the rest
+        # start_listening() blocks forever (loops over incoming messages),
+        # so run it in a background thread while we send audio here.
+        listener = threading.Thread(target=conn.start_listening, daemon=True)
+        listener.start()
+
         conn.send_media(first)
         for chunk in audio_chunks:
             conn.send_media(chunk)
