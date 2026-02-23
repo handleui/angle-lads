@@ -52,7 +52,10 @@ def on_transcript(text: str, is_final: bool):
 
 def pipeline_thread():
     """Run mic → Deepgram → detection in a blocking thread."""
-    transcriber.run(on_transcript, audio.stream)
+    print("Opening microphone…")
+    mic = audio.stream()
+    print("Mic ready, connecting to Deepgram…")
+    transcriber.run(on_transcript, mic)
 
 
 @asynccontextmanager

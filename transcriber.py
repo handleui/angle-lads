@@ -7,14 +7,18 @@ from deepgram.extensions.types.sockets.listen_v1_results_event import (
 import config
 
 
-def run(on_transcript, get_audio):
-    """Open Deepgram live connection, stream audio, and fire transcript events.
+def run(on_transcript, audio_chunks):
+    """Stream audio to Deepgram and fire transcript events.
 
     on_transcript(text, is_final) — called for each transcript event.
-    get_audio() — callable that yields audio bytes (blocks until data is ready).
+    audio_chunks — iterator of raw audio bytes (must already be started).
 
     This function blocks — run it in a thread.
     """
+    # Wait for the first chunk so the mic is fully open (permission prompt, etc.)
+    # before we connect to Deepgram and start its timeout clock.
+    first = next(audio_chunks)
+
     client = DeepgramClient(api_key=config.DEEPGRAM_API_KEY)
 
     with client.listen.v1.connect(
@@ -39,5 +43,7 @@ def run(on_transcript, get_audio):
         conn.on(EventType.MESSAGE, handle)
         conn.start_listening()
 
-        for chunk in get_audio():
+        # Send the buffered first chunk, then stream the rest
+        conn.send_media(first)
+        for chunk in audio_chunks:
             conn.send_media(chunk)
