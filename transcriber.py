@@ -1,4 +1,6 @@
+import random
 import threading
+import time
 
 from deepgram import DeepgramClient
 from deepgram.core.events import EventType
@@ -7,6 +9,9 @@ from deepgram.extensions.types.sockets.listen_v1_results_event import (
 )
 
 import config
+
+_RECONNECT_BASE_SECONDS = 0.25
+_RECONNECT_MAX_SECONDS = 8.0
 
 
 def run(on_transcript, audio_chunks):
@@ -17,10 +22,30 @@ def run(on_transcript, audio_chunks):
 
     This function blocks — run it in a thread.
     """
-    first = next(audio_chunks)
-
+    audio_iter = iter(audio_chunks)
     client = DeepgramClient(api_key=config.DEEPGRAM_API_KEY)
+    attempts = 0
 
+    while True:
+        try:
+            _stream_session(client, on_transcript, audio_iter)
+            attempts = 0
+        except StopIteration:
+            return
+        except Exception as exc:
+            attempts += 1
+            backoff = min(
+                _RECONNECT_MAX_SECONDS, _RECONNECT_BASE_SECONDS * (2 ** (attempts - 1))
+            )
+            delay = backoff + random.uniform(0.0, 0.25)
+            print(
+                f"Deepgram stream dropped ({exc.__class__.__name__}). "
+                f"Reconnecting in {delay:.2f}s..."
+            )
+            time.sleep(delay)
+
+
+def _stream_session(client, on_transcript, audio_chunks):
     with client.listen.v1.connect(
         model="nova-3",
         language="es",
@@ -47,6 +72,6 @@ def run(on_transcript, audio_chunks):
         listener = threading.Thread(target=conn.start_listening, daemon=True)
         listener.start()
 
-        conn.send_media(first)
-        for chunk in audio_chunks:
+        while True:
+            chunk = next(audio_chunks)
             conn.send_media(chunk)
