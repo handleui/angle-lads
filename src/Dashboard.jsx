@@ -36,9 +36,18 @@ function renderText(text, flags) {
   return parts;
 }
 
+function renderTiming(timingMs) {
+  if (!timingMs) return null;
+  const llm = timingMs.llm_roundtrip;
+  const e2e = timingMs.final_to_explanation;
+  if (typeof llm !== "number" || typeof e2e !== "number") return null;
+  return `llm ${llm}ms · e2e ${e2e}ms`;
+}
+
 export function Dashboard() {
   const [lines, setLines] = useState([]);
   const [interim, setInterim] = useState("");
+  const [explanations, setExplanations] = useState([]);
   const [startedAt] = useState(() => new Date());
   const [connected, setConnected] = useState(false);
   const endRef = useRef(null);
@@ -56,8 +65,11 @@ export function Dashboard() {
         const id = nextId.current++;
         setLines((prev) => [...prev, { id, text: msg.text, flags: msg.flags }]);
         setInterim("");
-      } else {
+      } else if (msg.type === "interim") {
         setInterim(msg.text);
+      } else if (msg.type === "explanation") {
+        const id = nextId.current++;
+        setExplanations((prev) => [...prev, { id, ...msg }].slice(-40));
       }
     };
 
@@ -87,6 +99,29 @@ export function Dashboard() {
         {interim && <span style={ghost}>{interim}</span>}
         <div ref={endRef} />
       </div>
+      <section style={panel}>
+        <h2 style={panelTitle}>Context Explanations</h2>
+        {explanations.length === 0 && (
+          <p style={empty}>Waiting for likely intergenerational confusion terms...</p>
+        )}
+        {explanations
+          .slice()
+          .reverse()
+          .map((item) => (
+            <article key={item.id} style={card}>
+              <header style={cardHead}>
+                <strong style={term}>{item.term}</strong>
+                <span style={badge}>
+                  {item.target_generation} · {(item.confidence * 100).toFixed(0)}%
+                </span>
+              </header>
+              <p style={lineStyle}>{item.text}</p>
+              <p style={definition}>{item.definition}</p>
+              <p style={why}>{item.why_in_context}</p>
+              {renderTiming(item.timing_ms) && <p style={timing}>{renderTiming(item.timing_ms)}</p>}
+            </article>
+          ))}
+      </section>
     </div>
   );
 }
@@ -134,3 +169,77 @@ const flagged = (generation) => ({
   borderBottom: `2px solid ${GEN_COLORS[generation] || "#999"}`,
   cursor: "help",
 });
+
+const panel = {
+  marginTop: 36,
+  borderTop: "1px solid #eee",
+  paddingTop: 20,
+};
+
+const panelTitle = {
+  margin: 0,
+  fontSize: 13,
+  fontWeight: 600,
+  letterSpacing: "0.04em",
+  textTransform: "uppercase",
+  color: "#777",
+};
+
+const empty = {
+  marginTop: 12,
+  color: "#999",
+  fontSize: 14,
+};
+
+const card = {
+  marginTop: 12,
+  border: "1px solid #ececec",
+  borderRadius: 10,
+  padding: 12,
+  background: "#fafafa",
+};
+
+const cardHead = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: 12,
+};
+
+const term = {
+  fontSize: 15,
+};
+
+const badge = {
+  fontSize: 11,
+  color: "#555",
+  border: "1px solid #ddd",
+  borderRadius: 999,
+  padding: "2px 8px",
+};
+
+const lineStyle = {
+  margin: "8px 0 0 0",
+  fontSize: 13,
+  color: "#666",
+  fontStyle: "italic",
+};
+
+const definition = {
+  margin: "8px 0 0 0",
+  fontSize: 14,
+  color: "#111",
+};
+
+const why = {
+  margin: "6px 0 0 0",
+  fontSize: 13,
+  color: "#333",
+};
+
+const timing = {
+  margin: "8px 0 0 0",
+  fontSize: 11,
+  color: "#777",
+  fontFamily: 'ui-monospace, "SFMono-Regular", Menlo, monospace',
+};
