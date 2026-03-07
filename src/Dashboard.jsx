@@ -69,7 +69,7 @@ export function Dashboard() {
         setInterim(msg.text);
       } else if (msg.type === "explanation") {
         const id = nextId.current++;
-        setExplanations((prev) => [...prev, { id, ...msg }].slice(Math.max(prev.length - 39, 0)));
+        setExplanations((prev) => [...prev, { id, ...msg }].slice(-40));
       }
     };
 

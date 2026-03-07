@@ -1,6 +1,7 @@
 import json
 import random
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -52,6 +53,7 @@ class ContextReasoner:
         self.retry_base_seconds = max(0.05, config.GEMINI_RETRY_BASE_SECONDS)
         self.enabled = bool(self.api_key)
         self._last_fired_at: dict[str, float] = {}
+        self._cooldown_lock = threading.Lock()
 
     def explain(self, latest_line: str, history: list[str]) -> dict | None:
         if not self.enabled:
@@ -90,11 +92,12 @@ class ContextReasoner:
     def _passes_cooldown(self, term: str) -> bool:
         now = time.monotonic()
         normalized = _normalize_term(term)
-        last_seen = self._last_fired_at.get(normalized, 0.0)
-        if now - last_seen < self.cooldown_seconds:
-            return False
-        self._last_fired_at[normalized] = now
-        return True
+        with self._cooldown_lock:
+            last_seen = self._last_fired_at.get(normalized, 0.0)
+            if now - last_seen < self.cooldown_seconds:
+                return False
+            self._last_fired_at[normalized] = now
+            return True
 
     def _generate_json(self, latest_line: str, history: list[str]) -> str | None:
         history_slice = history[-config.GEMINI_CONTEXT_LINES :]

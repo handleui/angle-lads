@@ -12,6 +12,7 @@ import config
 
 _RECONNECT_BASE_SECONDS = 0.25
 _RECONNECT_MAX_SECONDS = 8.0
+_FAILURE_STREAK_RESET_SECONDS = 30.0
 
 
 def run(on_transcript, audio_chunks):
@@ -25,6 +26,7 @@ def run(on_transcript, audio_chunks):
     audio_iter = iter(audio_chunks)
     client = DeepgramClient(api_key=config.DEEPGRAM_API_KEY)
     attempts = 0
+    last_failure_at = 0.0
 
     while True:
         try:
@@ -33,7 +35,11 @@ def run(on_transcript, audio_chunks):
         except StopIteration:
             return
         except Exception as exc:
+            now = time.monotonic()
+            if not last_failure_at or (now - last_failure_at) > _FAILURE_STREAK_RESET_SECONDS:
+                attempts = 0
             attempts += 1
+            last_failure_at = now
             backoff = min(
                 _RECONNECT_MAX_SECONDS, _RECONNECT_BASE_SECONDS * (2 ** (attempts - 1))
             )
