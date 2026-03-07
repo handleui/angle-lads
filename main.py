@@ -61,7 +61,10 @@ def _percentile(values: list[int], percentile: float) -> int | None:
     if not values:
         return None
     ordered = sorted(values)
-    index = int((percentile / 100.0) * (len(ordered) - 1))
+    index = min(
+        round((percentile / 100.0) * (len(ordered) - 1)),
+        len(ordered) - 1,
+    )
     return ordered[index]
 
 
@@ -146,7 +149,7 @@ def on_transcript(text: str, is_final: bool):
     msg = {"type": "final" if is_final else "interim", "text": text, "flags": flags}
     asyncio.run_coroutine_threadsafe(broadcast(msg), loop)
 
-    if is_final and llm_reasoner.enabled and history_snapshot:
+    if is_final and llm_reasoner.enabled:
         asyncio.run_coroutine_threadsafe(
             analyze_and_broadcast(text, history_snapshot, received_at), loop
         )

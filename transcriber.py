@@ -52,6 +52,7 @@ def run(on_transcript, audio_chunks):
 
 
 def _stream_session(client, on_transcript, audio_chunks):
+    first_chunk = next(audio_chunks)
     with client.listen.v1.connect(
         model="nova-3",
         language="es",
@@ -78,6 +79,7 @@ def _stream_session(client, on_transcript, audio_chunks):
         listener = threading.Thread(target=conn.start_listening, daemon=True)
         listener.start()
 
+        conn.send_media(first_chunk)
         while True:
             chunk = next(audio_chunks)
             conn.send_media(chunk)
