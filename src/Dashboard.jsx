@@ -1,5 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 
+const WS_URL = "ws://localhost:8000/ws";
+const METRICS_URL = "http://localhost:8000/metrics";
+const RECONNECT_DELAY_MS = 1000;
+const METRICS_POLL_MS = 2000;
+const COLORS = {
+  text: "#0f172a",
+  muted: "#64748b",
+  border: "#edf2f7",
+  error: "#b42318",
+};
+const TRACKING = "-0.03em";
+
 const GEN_COLORS = {
   gen_z: "#0070f3",
   millennial: "#7928ca",
@@ -44,36 +56,106 @@ function renderTiming(timingMs) {
   return `llm ${llm}ms · e2e ${e2e}ms`;
 }
 
+function renderStatusDetail(connected, connectionError, pipelineState) {
+  if (!connected) return connectionError || "conectando";
+  if (!pipelineState) return "cargando";
+  return [
+    pipelineState.status,
+    `audio ${pipelineState.audio_chunks_sent}`,
+    `queue ${pipelineState.ai_queue_depth}`,
+  ].join(" · ");
+}
+
 export function Dashboard() {
   const [lines, setLines] = useState([]);
   const [interim, setInterim] = useState("");
   const [explanations, setExplanations] = useState([]);
   const [startedAt] = useState(() => new Date());
   const [connected, setConnected] = useState(false);
+  const [connectionError, setConnectionError] = useState("");
+  const [pipelineError, setPipelineError] = useState("");
+  const [pipelineState, setPipelineState] = useState(null);
   const endRef = useRef(null);
   const nextId = useRef(0);
 
   useEffect(() => {
-    const ws = new WebSocket("ws://localhost:8000/ws");
+    let ws;
+    let reconnectTimer;
+    let cancelled = false;
 
-    ws.onopen = () => setConnected(true);
-    ws.onclose = () => setConnected(false);
+    const connect = () => {
+      if (cancelled) return;
 
-    ws.onmessage = (e) => {
-      const msg = JSON.parse(e.data);
-      if (msg.type === "final") {
-        const id = nextId.current++;
-        setLines((prev) => [...prev, { id, text: msg.text, flags: msg.flags }]);
-        setInterim("");
-      } else if (msg.type === "interim") {
-        setInterim(msg.text);
-      } else if (msg.type === "explanation") {
-        const id = nextId.current++;
-        setExplanations((prev) => [...prev, { id, ...msg }].slice(-40));
+      ws = new WebSocket(WS_URL);
+
+      ws.onopen = () => {
+        setConnected(true);
+        setConnectionError("");
+      };
+
+      ws.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.type === "final") {
+          const id = nextId.current++;
+          setLines((prev) => [...prev, { id, text: msg.text, flags: msg.flags }]);
+          setInterim("");
+        } else if (msg.type === "interim") {
+          setInterim(msg.text);
+        } else if (msg.type === "explanation") {
+          const id = nextId.current++;
+          setExplanations((prev) => [...prev, { id, ...msg }].slice(-40));
+        }
+      };
+
+      ws.onerror = () => {
+        setConnectionError("WebSocket no disponible. Esperando backend…");
+      };
+
+      ws.onclose = () => {
+        setConnected(false);
+        if (cancelled) return;
+        setConnectionError("WebSocket no disponible. Esperando backend…");
+        reconnectTimer = window.setTimeout(connect, RECONNECT_DELAY_MS);
+      };
+    };
+
+    connect();
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(reconnectTimer);
+      ws?.close();
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadMetrics = async () => {
+      try {
+        const res = await fetch(METRICS_URL);
+        if (!res.ok) {
+          throw new Error(`metrics returned ${res.status}`);
+        }
+        const data = await res.json();
+        if (cancelled) return;
+        const error = data.pipeline?.last_error;
+        setPipelineError(typeof error === "string" ? error : "");
+        setPipelineState(data.pipeline ?? null);
+      } catch {
+        if (cancelled) return;
+        setPipelineError("");
+        setPipelineState(null);
       }
     };
 
-    return () => ws.close();
+    loadMetrics();
+    const interval = window.setInterval(loadMetrics, METRICS_POLL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
   }, []);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: scroll on every state change
@@ -89,32 +171,34 @@ export function Dashboard() {
   return (
     <div style={root}>
       <header style={head}>
-        <span style={dot(connected)} />
-        <span style={timestamp}>{time}</span>
+        <div style={headLeft}>
+          <span style={dot(connected)} />
+          <span style={timestamp}>{time}</span>
+        </div>
+        <p style={statusRail}>{renderStatusDetail(connected, connectionError, pipelineState)}</p>
       </header>
-      <div style={transcript}>
-        {lines.map((line) => (
-          <span key={line.id}>{renderText(line.text, line.flags)} </span>
-        ))}
-        {interim && <span style={ghost}>{interim}</span>}
-        <div ref={endRef} />
-      </div>
-      <section style={panel}>
-        <h2 style={panelTitle}>Context Explanations</h2>
+      {pipelineError && <p style={errorText}>error del pipeline · {pipelineError}</p>}
+      {pipelineState?.deepgram_detail && (
+        <p style={metaLine}>deepgram · {pipelineState.deepgram_detail}</p>
+      )}
+      {pipelineState?.last_transcript && (
+        <p style={metaLine}>
+          ultima {pipelineState.last_transcript_kind} · {pipelineState.last_transcript}
+        </p>
+      )}
+      <section style={contextCard}>
+        <p style={panelTitle}>Contexto</p>
         {explanations.length === 0 && (
-          <p style={empty}>Waiting for likely intergenerational confusion terms...</p>
+          <p style={empty}>Esperando terminos que puedan causar confusion generacional...</p>
         )}
         {explanations
           .slice()
           .reverse()
           .map((item) => (
-            <article key={item.id} style={card}>
-              <header style={cardHead}>
-                <strong style={term}>{item.term}</strong>
-                <span style={badge}>
-                  {item.target_generation} · {(item.confidence * 100).toFixed(0)}%
-                </span>
-              </header>
+            <article key={item.id} style={entry}>
+              <p style={entryMeta}>
+                {item.term} · {item.target_generation} · {(item.confidence * 100).toFixed(0)}%
+              </p>
               <p style={lineStyle}>{item.text}</p>
               <p style={definition}>{item.definition}</p>
               <p style={why}>{item.why_in_context}</p>
@@ -122,47 +206,94 @@ export function Dashboard() {
             </article>
           ))}
       </section>
+      <div style={transcript}>
+        {lines.map((line) => (
+          <span key={line.id}>{renderText(line.text, line.flags)} </span>
+        ))}
+        {interim && <span style={ghost}>{interim}</span>}
+        <div ref={endRef} />
+      </div>
     </div>
   );
 }
 
 const root = {
-  maxWidth: 640,
+  maxWidth: 760,
   margin: "0 auto",
-  padding: "48px 24px",
+  padding: "32px 24px 40px",
   fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+  color: COLORS.text,
 };
 
 const head = {
   display: "flex",
   alignItems: "center",
+  justifyContent: "space-between",
+  gap: 24,
+  marginBottom: 18,
+};
+
+const headLeft = {
+  display: "flex",
+  alignItems: "center",
   gap: 8,
-  marginBottom: 32,
 };
 
 const dot = (on) => ({
   width: 6,
   height: 6,
   borderRadius: "50%",
-  backgroundColor: on ? "#000" : "#ccc",
+  backgroundColor: on ? COLORS.text : COLORS.border,
   transition: "background-color 0.2s",
 });
 
 const timestamp = {
   fontSize: 13,
-  color: "#999",
+  color: COLORS.text,
   fontVariantNumeric: "tabular-nums",
+  letterSpacing: TRACKING,
+};
+
+const statusRail = {
+  margin: 0,
+  fontSize: 13,
+  color: COLORS.muted,
+  letterSpacing: TRACKING,
+  textAlign: "right",
+};
+
+const errorText = {
+  margin: "0 0 8px 0",
+  fontSize: 13,
+  color: COLORS.error,
+  letterSpacing: TRACKING,
+};
+
+const metaLine = {
+  margin: "0 0 8px 0",
+  fontSize: 13,
+  color: COLORS.muted,
+  letterSpacing: TRACKING,
+};
+
+const contextCard = {
+  marginTop: 16,
+  marginBottom: 24,
+  padding: "14px 16px",
+  border: `1px solid ${COLORS.border}`,
+  borderRadius: 10,
 };
 
 const transcript = {
   fontSize: 15,
-  lineHeight: 1.8,
-  color: "#111",
-  letterSpacing: "-0.01em",
+  lineHeight: 1.75,
+  color: COLORS.text,
+  letterSpacing: TRACKING,
 };
 
 const ghost = {
-  color: "#ccc",
+  color: COLORS.muted,
+  letterSpacing: TRACKING,
 };
 
 const flagged = (generation) => ({
@@ -170,76 +301,56 @@ const flagged = (generation) => ({
   cursor: "help",
 });
 
-const panel = {
-  marginTop: 36,
-  borderTop: "1px solid #eee",
-  paddingTop: 20,
-};
-
 const panelTitle = {
   margin: 0,
   fontSize: 13,
-  fontWeight: 600,
-  letterSpacing: "0.04em",
-  textTransform: "uppercase",
-  color: "#777",
+  color: COLORS.text,
+  letterSpacing: TRACKING,
 };
 
 const empty = {
-  marginTop: 12,
-  color: "#999",
+  margin: "10px 0 0 0",
+  color: COLORS.muted,
   fontSize: 14,
+  letterSpacing: TRACKING,
 };
 
-const card = {
-  marginTop: 12,
-  border: "1px solid #ececec",
-  borderRadius: 10,
-  padding: 12,
-  background: "#fafafa",
+const entry = {
+  paddingTop: 14,
 };
 
-const cardHead = {
-  display: "flex",
-  justifyContent: "space-between",
-  alignItems: "center",
-  gap: 12,
-};
-
-const term = {
-  fontSize: 15,
-};
-
-const badge = {
-  fontSize: 11,
-  color: "#555",
-  border: "1px solid #ddd",
-  borderRadius: 999,
-  padding: "2px 8px",
+const entryMeta = {
+  margin: 0,
+  fontSize: 13,
+  color: COLORS.muted,
+  letterSpacing: TRACKING,
 };
 
 const lineStyle = {
-  margin: "8px 0 0 0",
+  margin: "6px 0 0 0",
   fontSize: 13,
-  color: "#666",
-  fontStyle: "italic",
+  color: COLORS.muted,
+  letterSpacing: TRACKING,
 };
 
 const definition = {
   margin: "8px 0 0 0",
   fontSize: 14,
-  color: "#111",
+  color: COLORS.text,
+  letterSpacing: TRACKING,
 };
 
 const why = {
   margin: "6px 0 0 0",
   fontSize: 13,
-  color: "#333",
+  color: COLORS.muted,
+  letterSpacing: TRACKING,
 };
 
 const timing = {
   margin: "8px 0 0 0",
   fontSize: 11,
-  color: "#777",
+  color: COLORS.muted,
+  letterSpacing: TRACKING,
   fontFamily: 'ui-monospace, "SFMono-Regular", Menlo, monospace',
 };

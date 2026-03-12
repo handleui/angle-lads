@@ -15,11 +15,12 @@ _RECONNECT_MAX_SECONDS = 8.0
 _FAILURE_STREAK_RESET_SECONDS = 30.0
 
 
-def run(on_transcript, audio_chunks):
+def run(on_transcript, audio_chunks, on_status=None):
     """Stream audio to Deepgram and fire transcript events.
 
     on_transcript(text, is_final) — called for each transcript event.
     audio_chunks — iterator of raw audio bytes (must already be started).
+    on_status(event, detail) — optional callback for connection telemetry.
 
     This function blocks — run it in a thread.
     """
@@ -30,9 +31,11 @@ def run(on_transcript, audio_chunks):
 
     while True:
         try:
-            _stream_session(client, on_transcript, audio_iter)
+            _emit_status(on_status, "connecting", None)
+            _stream_session(client, on_transcript, audio_iter, on_status)
             attempts = 0
         except StopIteration:
+            _emit_status(on_status, "stopped", "audio stream ended")
             return
         except Exception as exc:
             now = time.monotonic()
@@ -48,10 +51,15 @@ def run(on_transcript, audio_chunks):
                 f"Deepgram stream dropped ({exc.__class__.__name__}). "
                 f"Reconnecting in {delay:.2f}s..."
             )
+            _emit_status(
+                on_status,
+                "reconnecting",
+                f"{exc.__class__.__name__}: {exc} (retry in {delay:.2f}s)",
+            )
             time.sleep(delay)
 
 
-def _stream_session(client, on_transcript, audio_chunks):
+def _stream_session(client, on_transcript, audio_chunks, on_status):
     first_chunk = next(audio_chunks)
     with client.listen.v1.connect(
         model="nova-3",
@@ -63,6 +71,7 @@ def _stream_session(client, on_transcript, audio_chunks):
         smart_format="true",
         punctuate="true",
     ) as conn:
+        _emit_status(on_status, "connected", None)
 
         def handle(message):
             if not isinstance(message, ListenV1ResultsEvent):
@@ -70,6 +79,7 @@ def _stream_session(client, on_transcript, audio_chunks):
             text = message.channel.alternatives[0].transcript
             if not text:
                 return
+            _emit_status(on_status, "transcript", "final" if message.is_final else "interim")
             on_transcript(text, message.is_final)
 
         conn.on(EventType.MESSAGE, handle)
@@ -83,3 +93,9 @@ def _stream_session(client, on_transcript, audio_chunks):
         while True:
             chunk = next(audio_chunks)
             conn.send_media(chunk)
+
+
+def _emit_status(on_status, event: str, detail: str | None):
+    if on_status is None:
+        return
+    on_status(event, detail)

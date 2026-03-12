@@ -1,5 +1,6 @@
 import asyncio
 import json
+import traceback
 import threading
 import time
 from collections import deque
@@ -24,6 +25,8 @@ GEN_COLORS = {
 
 clients: set[WebSocket] = set()
 loop: asyncio.AbstractEventLoop | None = None
+ai_worker_task: asyncio.Task | None = None
+ai_queue: asyncio.Queue | None = None
 context_lock = threading.Lock()
 context_lines = deque(maxlen=config.GEMINI_CONTEXT_LINES)
 llm_reasoner = reasoner.ContextReasoner()
@@ -37,7 +40,21 @@ pipeline_counts = {
     "interim_events": 0,
     "final_events": 0,
     "explanations_emitted": 0,
+    "ai_jobs_enqueued": 0,
+    "ai_jobs_dropped": 0,
 }
+pipeline_state = {
+    "status": "idle",
+    "last_error": None,
+    "deepgram_status": "idle",
+    "deepgram_detail": None,
+    "last_event_at": None,
+    "last_transcript": None,
+    "last_transcript_kind": None,
+    "audio_chunks_sent": 0,
+    "ai_queue_depth": 0,
+}
+AI_QUEUE_MAXSIZE = 8
 
 
 async def broadcast(message: dict):
@@ -119,6 +136,24 @@ async def analyze_and_broadcast(
     )
 
 
+async def ai_worker():
+    while True:
+        try:
+            item = await ai_queue.get()
+        except asyncio.CancelledError:
+            break
+
+        try:
+            if item is None:
+                break
+            text, history_snapshot, final_received_at = item
+            await analyze_and_broadcast(text, history_snapshot, final_received_at)
+        finally:
+            with metrics_lock:
+                pipeline_state["ai_queue_depth"] = ai_queue.qsize()
+            ai_queue.task_done()
+
+
 def on_transcript(text: str, is_final: bool):
     if loop is None:
         return
@@ -147,26 +182,103 @@ def on_transcript(text: str, is_final: bool):
         )
 
     msg = {"type": "final" if is_final else "interim", "text": text, "flags": flags}
+    with metrics_lock:
+        pipeline_state["last_event_at"] = time.time()
+        pipeline_state["last_transcript"] = text[-160:]
+        pipeline_state["last_transcript_kind"] = "final" if is_final else "interim"
     asyncio.run_coroutine_threadsafe(broadcast(msg), loop)
 
     if is_final and llm_reasoner.enabled:
-        asyncio.run_coroutine_threadsafe(
-            analyze_and_broadcast(text, history_snapshot, received_at), loop
-        )
+        try:
+            ai_queue.put_nowait((text, history_snapshot, received_at))
+            with metrics_lock:
+                pipeline_counts["ai_jobs_enqueued"] += 1
+                pipeline_state["ai_queue_depth"] = ai_queue.qsize()
+        except asyncio.QueueFull:
+            with metrics_lock:
+                pipeline_counts["ai_jobs_dropped"] += 1
+                pipeline_state["ai_queue_depth"] = ai_queue.qsize()
+
+
+def on_pipeline_status(event: str, detail: str | None):
+    with metrics_lock:
+        pipeline_state["last_event_at"] = time.time()
+
+        if event == "connected":
+            pipeline_state["status"] = "running"
+            pipeline_state["deepgram_status"] = "connected"
+            pipeline_state["deepgram_detail"] = None
+            return
+
+        if event == "connecting":
+            pipeline_state["status"] = "starting"
+            pipeline_state["deepgram_status"] = "connecting"
+            pipeline_state["deepgram_detail"] = detail
+            return
+
+        if event == "reconnecting":
+            pipeline_state["status"] = "degraded"
+            pipeline_state["deepgram_status"] = "reconnecting"
+            pipeline_state["deepgram_detail"] = detail
+            return
+
+        if event == "stopped":
+            pipeline_state["status"] = "stopped"
+            pipeline_state["deepgram_status"] = "stopped"
+            pipeline_state["deepgram_detail"] = detail
+            return
+
+        if event == "transcript":
+            pipeline_state["deepgram_status"] = "streaming"
+            pipeline_state["deepgram_detail"] = detail
+
+
+def tracked_audio_stream():
+    for chunk in audio.stream():
+        with metrics_lock:
+            pipeline_state["audio_chunks_sent"] += 1
+            pipeline_state["last_event_at"] = time.time()
+        yield chunk
 
 
 def pipeline_thread():
     """Run mic → Deepgram → detection in a blocking thread."""
-    print("Opening microphone…")
-    mic = audio.stream()
-    print("Mic ready, connecting to Deepgram…")
-    transcriber.run(on_transcript, mic)
+    with metrics_lock:
+        pipeline_state["status"] = "starting"
+        pipeline_state["last_error"] = None
+        pipeline_state["deepgram_status"] = "starting"
+        pipeline_state["deepgram_detail"] = None
+        pipeline_state["last_event_at"] = time.time()
+        pipeline_state["last_transcript"] = None
+        pipeline_state["last_transcript_kind"] = None
+        pipeline_state["audio_chunks_sent"] = 0
+        pipeline_state["ai_queue_depth"] = 0
+
+    try:
+        print("Opening microphone…")
+        mic = tracked_audio_stream()
+        print("Mic ready, connecting to Deepgram…")
+        with metrics_lock:
+            pipeline_state["status"] = "running"
+            pipeline_state["deepgram_status"] = "connecting"
+        transcriber.run(on_transcript, mic, on_pipeline_status)
+    except Exception as exc:
+        error = f"{exc.__class__.__name__}: {exc}"
+        with metrics_lock:
+            pipeline_state["status"] = "error"
+            pipeline_state["last_error"] = error
+            pipeline_state["deepgram_status"] = "error"
+            pipeline_state["deepgram_detail"] = error
+        print(f"[pipeline:error] {error}")
+        print(traceback.format_exc().rstrip())
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global loop
+    global loop, ai_worker_task, ai_queue
     loop = asyncio.get_running_loop()
+    ai_queue = asyncio.Queue(maxsize=AI_QUEUE_MAXSIZE)
+    ai_worker_task = asyncio.create_task(ai_worker())
     if llm_reasoner.enabled:
         print(f"AI detector enabled ({llm_reasoner.model})")
     else:
@@ -179,6 +291,11 @@ async def lifespan(app: FastAPI):
     t.start()
 
     yield
+
+    if ai_queue is not None:
+        await ai_queue.put(None)
+    if ai_worker_task is not None:
+        await ai_worker_task
 
 
 app = FastAPI(lifespan=lifespan)
@@ -195,10 +312,12 @@ app.add_middleware(
 async def metrics():
     with metrics_lock:
         counts = dict(pipeline_counts)
+        pipeline = dict(pipeline_state)
     return {
         "uptime_seconds": int(time.time() - service_started_at),
         "connected_clients": len(clients),
         "counts": counts,
+        "pipeline": pipeline,
         "latency_ms": _latency_summary(),
     }
 
