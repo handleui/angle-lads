@@ -38,6 +38,10 @@ just fmt      # format everything (ruff + biome)
 Dashboard opens at `http://localhost:5173`. Python service runs on `http://localhost:8000`.
 Latency and counters are available at `http://localhost:8000/metrics`.
 
+## Docs
+
+- [Generation targeting](docs/generation-targeting.md)
+
 ## Interface
 
 - Live transcript with clickable highlighted terms

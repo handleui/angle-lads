@@ -22,22 +22,24 @@ _CURRENT_OPTIMISTIC_FINAL_MS = config.OPENAI_REALTIME_OPTIMISTIC_FINAL_MS
 _PRESETS = {
     "cafe": {
         "vad_mode": "server_vad",
-        "vad_threshold": 0.7,
-        "prefix_padding_ms": 140,
-        "silence_ms": 260,
-        "optimistic_final_ms": 0,
+        "vad_threshold": 0.52,
+        "prefix_padding_ms": 220,
+        "silence_ms": 420,
+        "optimistic_final_ms": 900,
     },
     "privado": {
         "vad_mode": "server_vad",
-        "vad_threshold": 0.58,
-        "prefix_padding_ms": 200,
-        "silence_ms": 340,
-        "optimistic_final_ms": 0,
+        "vad_threshold": 0.48,
+        "prefix_padding_ms": 240,
+        "silence_ms": 460,
+        "optimistic_final_ms": 900,
     },
     "focus": {
-        "vad_mode": "semantic_vad",
-        "vad_eagerness": "high",
-        "optimistic_final_ms": 0,
+        "vad_mode": "server_vad",
+        "vad_threshold": 0.5,
+        "prefix_padding_ms": 220,
+        "silence_ms": 380,
+        "optimistic_final_ms": 700,
     },
 }
 
@@ -403,6 +405,8 @@ def _transcription_prompt() -> str:
         "Transcribe audio exactly as spoken.",
         "Do not translate or switch languages.",
         "Prefer Mexican Spanish and common Spanglish spellings.",
+        "Multiple speakers may appear; transcribe whatever is clearly audible.",
+        "Do not wait for perfect full sentences before stabilizing what you can hear.",
         "If audio is unclear, keep the transcript conservative instead of "
         "inventing words.",
     ]

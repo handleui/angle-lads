@@ -45,6 +45,8 @@ latency_samples = {
 pipeline_counts = {
     "interim_events": 0,
     "final_events": 0,
+    "transcripts_dropped": 0,
+    "transcripts_dropped_low_confidence": 0,
     "explanations_emitted": 0,
     "ai_jobs_enqueued": 0,
     "ai_jobs_dropped": 0,
@@ -57,6 +59,9 @@ pipeline_state = {
     "last_event_at": None,
     "last_transcript": None,
     "last_transcript_kind": None,
+    "last_drop_reason": None,
+    "last_drop_text": None,
+    "last_drop_avg_logprob": None,
     "audio_chunks_sent": 0,
     "audio_level": 0,
     "ai_queue_depth": 0,
@@ -278,13 +283,21 @@ def on_transcript(
 
     received_at = time.perf_counter()
     text = text.strip()
-    if (
-        not text
-        or _is_low_confidence_transcript(text, is_final, provisional, metadata)
-        or _contains_disallowed_script(text)
-        or _looks_like_dictionary_dump(text)
-        or _looks_unsupported_language(text)
-    ):
+    drop_reason = _drop_reason_for_transcript(text, is_final, provisional, metadata)
+    if drop_reason is not None:
+        with metrics_lock:
+            pipeline_counts["transcripts_dropped"] += 1
+            if drop_reason == "low_confidence":
+                pipeline_counts["transcripts_dropped_low_confidence"] += 1
+            pipeline_state["last_drop_reason"] = drop_reason
+            pipeline_state["last_drop_text"] = text[-160:] if text else None
+            pipeline_state["last_drop_avg_logprob"] = (
+                round(float(metadata["avg_logprob"]), 3)
+                if drop_reason == "low_confidence"
+                and metadata
+                and isinstance(metadata.get("avg_logprob"), (int, float))
+                else None
+            )
         return
     with metrics_lock:
         key = "final_events" if is_final else "interim_events"
@@ -338,6 +351,25 @@ def on_transcript(
                 pipeline_state["ai_queue_depth"] = ai_queue.qsize()
 
 
+def _drop_reason_for_transcript(
+    text: str,
+    is_final: bool,
+    provisional: bool,
+    metadata: dict | None,
+) -> str | None:
+    if not text:
+        return "empty"
+    if _is_low_confidence_transcript(text, is_final, provisional, metadata):
+        return "low_confidence"
+    if _contains_disallowed_script(text):
+        return "disallowed_script"
+    if _looks_like_dictionary_dump(text):
+        return "dictionary_dump"
+    if _looks_unsupported_language(text):
+        return "unsupported_language"
+    return None
+
+
 def _is_low_confidence_transcript(
     text: str,
     is_final: bool,
@@ -352,6 +384,10 @@ def _is_low_confidence_transcript(
     if not isinstance(avg_logprob, (int, float)):
         return False
     if avg_logprob >= config.OPENAI_REALTIME_MIN_AVG_LOGPROB:
+        return False
+    severe_cutoff = config.OPENAI_REALTIME_MIN_AVG_LOGPROB - 0.45
+    word_count = len(text.split())
+    if avg_logprob > severe_cutoff and (word_count >= 4 or len(text) >= 24):
         return False
     print(f"[transcript:drop] low confidence avg_logprob={avg_logprob:.2f} :: {text}")
     return True
@@ -548,6 +584,9 @@ def pipeline_thread():
         pipeline_state["last_event_at"] = time.time()
         pipeline_state["last_transcript"] = None
         pipeline_state["last_transcript_kind"] = None
+        pipeline_state["last_drop_reason"] = None
+        pipeline_state["last_drop_text"] = None
+        pipeline_state["last_drop_avg_logprob"] = None
         pipeline_state["audio_chunks_sent"] = 0
         pipeline_state["audio_level"] = 0
         pipeline_state["ai_queue_depth"] = 0

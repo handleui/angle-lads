@@ -7,6 +7,7 @@ const PRESET_URL = "http://localhost:8000/preset";
 const RECONNECT_DELAY_MS = 1000;
 const WS_HEARTBEAT_MS = 15000;
 const METRICS_POLL_MS = 200;
+const EXPLANATION_MIN_PRESENCE_MS = 5000;
 const TRACKING = "-0.03em";
 const COLORS = {
   background: "#f5f3ef",
@@ -178,6 +179,7 @@ export function Dashboard() {
   const endRef = useRef(null);
   const transcriptRef = useRef(null);
   const stickToBottomRef = useRef(true);
+  const explanationShownAtRef = useRef(0);
   const PROVISIONAL_SETTLE_MS = 900;
   const preset = usePresetStore((state) => state.preset);
   const hydrated = usePresetStore((state) => state.hydrated);
@@ -278,8 +280,10 @@ export function Dashboard() {
           );
           setExplanations((prev) => {
             const next = [...prev, msg].slice(-40);
-            setActiveExplanationIndex(next.length - 1);
-            setSelectedFlag(null);
+            if (prev.length === 0) {
+              explanationShownAtRef.current = Date.now();
+              setActiveExplanationIndex(0);
+            }
             return next;
           });
         }
@@ -413,6 +417,22 @@ export function Dashboard() {
     return () => window.clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    if (selectedFlag || explanations.length === 0) return;
+
+    const newestIndex = explanations.length - 1;
+    if (activeExplanationIndex >= newestIndex) return;
+
+    const elapsed = Date.now() - explanationShownAtRef.current;
+    const delay = Math.max(EXPLANATION_MIN_PRESENCE_MS - elapsed, 0);
+    const timer = window.setTimeout(() => {
+      explanationShownAtRef.current = Date.now();
+      setActiveExplanationIndex((prev) => Math.min(prev + 1, explanations.length - 1));
+    }, delay);
+
+    return () => window.clearTimeout(timer);
+  }, [activeExplanationIndex, explanations.length, selectedFlag]);
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentional live scroll
   useEffect(() => {
     if (!stickToBottomRef.current) return;
@@ -446,6 +466,7 @@ export function Dashboard() {
   const selectFlag = (lineId, flag, explanationIndex) => {
     setSelectedFlag({ lineId, flag, explanationIndex });
     if (explanationIndex >= 0) {
+      explanationShownAtRef.current = Date.now();
       setActiveExplanationIndex(explanationIndex);
     }
   };
@@ -575,6 +596,7 @@ export function Dashboard() {
                       style={navButton}
                       onClick={() => {
                         setSelectedFlag(null);
+                        explanationShownAtRef.current = Date.now();
                         setActiveExplanationIndex((prev) => Math.max(0, prev - 1));
                       }}
                       disabled={activeExplanationIndex === 0}
@@ -592,6 +614,7 @@ export function Dashboard() {
                       style={navButton}
                       onClick={() => {
                         setSelectedFlag(null);
+                        explanationShownAtRef.current = Date.now();
                         setActiveExplanationIndex((prev) =>
                           Math.min(explanations.length - 1, prev + 1),
                         );
