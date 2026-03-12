@@ -7,6 +7,7 @@ import random
 from websockets.asyncio.client import connect
 
 import config
+import detector
 
 _REALTIME_URL = "wss://api.openai.com/v1/realtime"
 _RECONNECT_BASE_SECONDS = 0.25
@@ -53,6 +54,12 @@ async def _run(on_transcript, audio_iter, on_status):
     }
     url = f"{_REALTIME_URL}?model={config.OPENAI_REALTIME_SESSION_MODEL}"
     partials: dict[str, str] = {}
+    ordered_items: list[str] = []
+    waiting_children: dict[str | None, list[str]] = {}
+    completed_items: dict[str, str] = {}
+    emitted_items: set[str] = set()
+    optimistic_tasks: dict[str, asyncio.Task] = {}
+    latest_partial = {"item_id": None}
 
     async with connect(url, additional_headers=headers, max_size=2**24) as ws:
         _emit_status(on_status, "connecting", None)
@@ -60,7 +67,20 @@ async def _run(on_transcript, audio_iter, on_status):
         await _await_session_ready(ws)
         _emit_status(on_status, "connected", None)
 
-        receiver = asyncio.create_task(_receive_loop(ws, partials, on_transcript, on_status))
+        receiver = asyncio.create_task(
+            _receive_loop(
+                ws,
+                partials,
+                ordered_items,
+                waiting_children,
+                completed_items,
+                emitted_items,
+                optimistic_tasks,
+                latest_partial,
+                on_transcript,
+                on_status,
+            )
+        )
         try:
             while True:
                 try:
@@ -83,7 +103,18 @@ async def _run(on_transcript, audio_iter, on_status):
                 await receiver
 
 
-async def _receive_loop(ws, partials, on_transcript, on_status):
+async def _receive_loop(
+    ws,
+    partials,
+    ordered_items,
+    waiting_children,
+    completed_items,
+    emitted_items,
+    optimistic_tasks,
+    latest_partial,
+    on_transcript,
+    on_status,
+):
     while True:
         message = json.loads(await ws.recv())
         event_type = str(message.get("type", ""))
@@ -94,15 +125,26 @@ async def _receive_loop(ws, partials, on_transcript, on_status):
             _emit_status(on_status, "reconnecting", str(detail))
             continue
 
+        if event_type == "input_audio_buffer.committed":
+            item_id = message.get("item_id")
+            previous_item_id = message.get("previous_item_id")
+            if item_id:
+                _insert_ordered_item(item_id, previous_item_id, ordered_items, waiting_children)
+                _flush_completed(ordered_items, completed_items, emitted_items, on_transcript, on_status)
+            continue
+
         if event_type.endswith("input_audio_transcription.delta"):
             item_id = message.get("item_id") or "default"
             partials[item_id] = partials.get(item_id, "") + str(message.get("delta", ""))
+            _cancel_optimistic(optimistic_tasks, item_id)
+            latest_partial["item_id"] = item_id
             _emit_status(on_status, "transcript", "interim")
-            on_transcript(partials[item_id].strip(), False)
+            on_transcript(partials[item_id].strip(), False, False, item_id)
             continue
 
         if event_type.endswith("input_audio_transcription.completed"):
             item_id = message.get("item_id") or "default"
+            _cancel_optimistic(optimistic_tasks, item_id)
             text = (
                 message.get("transcript")
                 or message.get("text")
@@ -110,8 +152,8 @@ async def _receive_loop(ws, partials, on_transcript, on_status):
             )
             text = str(text).strip()
             if text:
-                _emit_status(on_status, "transcript", "final")
-                on_transcript(text, True)
+                completed_items[item_id] = text
+                _flush_completed(ordered_items, completed_items, emitted_items, on_transcript, on_status)
             continue
 
         if event_type == "input_audio_buffer.speech_started":
@@ -120,25 +162,99 @@ async def _receive_loop(ws, partials, on_transcript, on_status):
 
         if event_type == "input_audio_buffer.speech_stopped":
             _emit_status(on_status, "streaming", "speech_stopped")
+            item_id = latest_partial.get("item_id")
+            if item_id and partials.get(item_id):
+                optimistic_tasks[item_id] = asyncio.create_task(
+                    _emit_optimistic_final(
+                        item_id,
+                        partials,
+                        completed_items,
+                        emitted_items,
+                        on_transcript,
+                    )
+                )
 
 
 def _session_config():
-    return {
+    dictionary_prompt = detector.transcription_prompt(config.OPENAI_REALTIME_DICTIONARY_TERMS)
+    prompt_parts = [part for part in [dictionary_prompt, config.OPENAI_REALTIME_PROMPT] if part]
+    session = {
         "input_audio_format": "pcm16",
         "input_audio_noise_reduction": {"type": "near_field"},
         "input_audio_transcription": {
             "model": config.OPENAI_REALTIME_MODEL,
             "language": config.OPENAI_REALTIME_LANGUAGE,
-            "prompt": config.OPENAI_REALTIME_PROMPT,
         },
-        "turn_detection": {
-            "type": "server_vad",
-            "threshold": config.OPENAI_REALTIME_VAD_THRESHOLD,
-            "prefix_padding_ms": config.OPENAI_REALTIME_PREFIX_PADDING_MS,
-            "silence_duration_ms": config.OPENAI_REALTIME_SILENCE_MS,
-            "create_response": config.OPENAI_REALTIME_CREATE_RESPONSE,
-        },
+        "turn_detection": _turn_detection_config(),
     }
+    if prompt_parts:
+        session["input_audio_transcription"]["prompt"] = "\n".join(prompt_parts)
+    return session
+
+
+def _turn_detection_config():
+    if config.OPENAI_REALTIME_VAD_MODE == "semantic_vad":
+        return {
+            "type": "semantic_vad",
+            "eagerness": config.OPENAI_REALTIME_VAD_EAGERNESS,
+            "create_response": config.OPENAI_REALTIME_CREATE_RESPONSE,
+        }
+    return {
+        "type": "server_vad",
+        "threshold": config.OPENAI_REALTIME_VAD_THRESHOLD,
+        "prefix_padding_ms": config.OPENAI_REALTIME_PREFIX_PADDING_MS,
+        "silence_duration_ms": config.OPENAI_REALTIME_SILENCE_MS,
+        "create_response": config.OPENAI_REALTIME_CREATE_RESPONSE,
+    }
+
+
+async def _emit_optimistic_final(
+    item_id: str,
+    partials: dict[str, str],
+    completed_items: dict[str, str],
+    emitted_items: set[str],
+    on_transcript,
+):
+    await asyncio.sleep(config.OPENAI_REALTIME_OPTIMISTIC_FINAL_MS / 1000)
+    if item_id in emitted_items or item_id in completed_items:
+        return
+    text = partials.get(item_id, "").strip()
+    if text:
+        on_transcript(text, True, True, item_id)
+
+
+def _cancel_optimistic(optimistic_tasks: dict[str, asyncio.Task], item_id: str):
+    task = optimistic_tasks.pop(item_id, None)
+    if task is not None:
+        task.cancel()
+
+
+def _insert_ordered_item(item_id, previous_item_id, ordered_items, waiting_children):
+    if item_id in ordered_items:
+        return
+    if previous_item_id is None:
+        ordered_items.insert(0, item_id)
+    elif previous_item_id in ordered_items:
+        ordered_items.insert(ordered_items.index(previous_item_id) + 1, item_id)
+    else:
+        waiting_children.setdefault(previous_item_id, []).append(item_id)
+        return
+
+    pending = waiting_children.pop(item_id, [])
+    for child_id in pending:
+        _insert_ordered_item(child_id, item_id, ordered_items, waiting_children)
+
+
+def _flush_completed(ordered_items, completed_items, emitted_items, on_transcript, on_status):
+    for item_id in ordered_items:
+        if item_id in emitted_items:
+            continue
+        text = completed_items.get(item_id)
+        if not text:
+            break
+        emitted_items.add(item_id)
+        _emit_status(on_status, "transcript", "final")
+        on_transcript(text, True, False, item_id)
 
 
 async def _await_session_ready(ws):

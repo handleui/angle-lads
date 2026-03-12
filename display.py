@@ -1,3 +1,3 @@
-# E-ink display output — stub for now.
-# Eventually pushes a PNG over local WiFi to the e-ink screen.
-# For now, just prints the image path to the console.
+# Legacy display stub.
+# The e-ink / external screen path is deprecated.
+# Character portraits are rendered directly in the web UI for now.

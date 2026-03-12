@@ -24,3 +24,4 @@ Thumbs.db
 
 # Env
 .env
+.angle-lads-cache.sqlite3

@@ -6,6 +6,7 @@ _DICT_DIR = Path(__file__).parent / "dictionary"
 
 # (compiled_pattern, canonical_term, info)
 _patterns: list[tuple[re.Pattern, str, dict]] = []
+_terms: list[str] = []
 
 # Conjugation suffixes for Spanglish -ear verbs (regular -ar pattern)
 _EAR_SUFFIXES = [
@@ -99,6 +100,7 @@ def _load():
         for term, definition in entries.items():
             info = {"definition": definition, "generation": generation}
             term_lower = term.lower()
+            _terms.append(term)
             pattern = _build_pattern(term_lower)
             _patterns.append((re.compile(pattern), term_lower, info))
 
@@ -129,3 +131,17 @@ def scan(text: str) -> list[dict]:
 
     matches.sort(key=lambda x: x["start"])
     return matches
+
+
+def transcription_prompt(max_terms: int = 80) -> str:
+    if not _patterns:
+        _load()
+    unique_terms = []
+    seen = set()
+    for term in _terms:
+        normalized = term.strip().lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_terms.append(term)
+    return ", ".join(unique_terms[:max_terms])

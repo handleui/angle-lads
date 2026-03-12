@@ -7,6 +7,8 @@ import urllib.error
 import urllib.request
 
 import config
+import detector
+from term_cache import TermCache
 
 _JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
 _TERM_RE = re.compile(r"\s+")
@@ -52,12 +54,16 @@ class OpenAIContextReasoner:
         self._cooldown_lock = threading.Lock()
         self._request_lock = threading.Lock()
         self._last_request_started_at = 0.0
+        self._cache = TermCache()
 
     def explain(self, latest_line: str, history: list[str]) -> dict | None:
         if not self.enabled:
             return None
 
         self.last_error = None
+        cached = self._lookup_local(latest_line)
+        if cached is not None and self._passes_cooldown(cached["term"]):
+            return cached
         if not self._wait_for_request_slot():
             return None
 
@@ -82,7 +88,7 @@ class OpenAIContextReasoner:
         if not self._passes_cooldown(term):
             return None
 
-        return {
+        explanation = {
             "term": term,
             "definition": definition,
             "why_in_context": why,
@@ -90,14 +96,31 @@ class OpenAIContextReasoner:
             "confidence": confidence,
             "model": self.model,
         }
+        self._cache.store(explanation)
+        return explanation
+
+    def _lookup_local(self, latest_line: str) -> dict | None:
+        dictionary_flags = detector.scan(latest_line)
+        if dictionary_flags:
+            match = dictionary_flags[0]
+            return {
+                "term": match["term"],
+                "definition": match["definition"],
+                "why_in_context": "Se usa aqui como termino coloquial dentro de la conversacion.",
+                "target_generation": match["generation"],
+                "confidence": 1.0,
+                "model": "dictionary",
+            }
+        return self._cache.lookup(latest_line)
 
     def _wait_for_request_slot(self) -> bool:
         with self._request_lock:
             now = time.monotonic()
             wait_seconds = self.min_request_seconds - (now - self._last_request_started_at)
             if wait_seconds > 0:
-                self.last_error = f"IA en enfriamiento ({wait_seconds:.1f}s)"
-                return False
+                self.last_error = None
+                time.sleep(wait_seconds)
+                now = time.monotonic()
             self._last_request_started_at = now
             return True
 
@@ -119,6 +142,10 @@ class OpenAIContextReasoner:
             "podria no entender en este contexto. Evalua SOLO la conversacion recibida. "
             "No confundas instrucciones del sistema con texto de la conversacion. "
             "Solo puedes marcar un termino si aparece literalmente o casi literalmente en la ultima frase. "
+            "Marca una sola palabra o expresion breve, no una frase completa. "
+            "No marques palabras comunes del espanol estandar, muletillas generales, ni insultos literales "
+            "a menos que sean slang estable o spanglish claro. "
+            "Si la frase ya es comprensible para un hablante general de espanol mexicano, responde should_flag=false. "
             "Si no hay termino coloquial claro, responde should_flag=false. "
             "Usa espanol claro y breve en definition y why_in_context."
         )

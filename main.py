@@ -4,6 +4,7 @@ import math
 import traceback
 import threading
 import time
+import unicodedata
 from array import array
 from collections import deque
 from contextlib import asynccontextmanager
@@ -16,8 +17,6 @@ import config
 import detector
 import openai_reasoner
 import openai_transcriber
-import reasoner
-import transcriber
 
 RESET = "\033[0m"
 GEN_COLORS = {
@@ -37,8 +36,6 @@ context_lock = threading.Lock()
 context_lines = deque(maxlen=config.GEMINI_CONTEXT_LINES)
 llm_reasoner = (
     openai_reasoner.OpenAIContextReasoner()
-    if config.EXPLANATION_PROVIDER == "openai"
-    else reasoner.ContextReasoner()
 )
 metrics_lock = threading.Lock()
 service_started_at = time.time()
@@ -65,10 +62,19 @@ pipeline_state = {
     "audio_level": 0,
     "ai_queue_depth": 0,
     "ai_error": None,
-    "transcription_provider": config.TRANSCRIPTION_PROVIDER,
-    "explanation_provider": config.EXPLANATION_PROVIDER,
+    "transcription_provider": "openai",
+    "explanation_provider": "openai",
 }
 AI_QUEUE_MAXSIZE = 8
+line_id_lock = threading.Lock()
+line_id_counter = 0
+
+
+def _next_line_id() -> int:
+    global line_id_counter
+    with line_id_lock:
+        line_id_counter += 1
+        return line_id_counter
 
 
 async def broadcast(message: dict):
@@ -114,7 +120,7 @@ def _latency_summary() -> dict:
 
 
 async def analyze_and_broadcast(
-    text: str, history_snapshot: list[str], final_received_at: float
+    line_id: int, text: str, history_snapshot: list[str], final_received_at: float
 ):
     llm_started_at = time.perf_counter()
     explanation = await asyncio.to_thread(llm_reasoner.explain, text, history_snapshot)
@@ -125,6 +131,8 @@ async def analyze_and_broadcast(
         with metrics_lock:
             pipeline_state["ai_error"] = llm_reasoner.last_error
         return
+
+    flags = _build_flags(text, explanation)
 
     avg_llm_ms = _record_latency("llm_roundtrip_ms", llm_roundtrip_ms)
     avg_e2e_ms = _record_latency("final_to_explanation_ms", final_to_explanation_ms)
@@ -141,7 +149,9 @@ async def analyze_and_broadcast(
     await broadcast(
         {
             "type": "explanation",
+            "line_id": line_id,
             "text": text,
+            "flags": flags,
             "timing_ms": {
                 "llm_roundtrip": llm_roundtrip_ms,
                 "final_to_explanation": final_to_explanation_ms,
@@ -164,8 +174,8 @@ async def ai_worker():
         try:
             if item is None:
                 break
-            text, history_snapshot, final_received_at = item
-            await analyze_and_broadcast(text, history_snapshot, final_received_at)
+            line_id, text, history_snapshot, final_received_at = item
+            await analyze_and_broadcast(line_id, text, history_snapshot, final_received_at)
             while True:
                 with pending_ai_lock:
                     pending = pending_ai_item
@@ -179,12 +189,20 @@ async def ai_worker():
             ai_queue.task_done()
 
 
-def on_transcript(text: str, is_final: bool):
+def on_transcript(
+    text: str,
+    is_final: bool,
+    provisional: bool = False,
+    source_id: str | None = None,
+):
     global pending_ai_item
     if loop is None:
         return
 
     received_at = time.perf_counter()
+    text = text.strip()
+    if not text or _contains_disallowed_script(text):
+        return
     with metrics_lock:
         key = "final_events" if is_final else "interim_events"
         pipeline_counts[key] += 1
@@ -192,7 +210,7 @@ def on_transcript(text: str, is_final: bool):
     flags = []
     history_snapshot: list[str] = []
 
-    if is_final:
+    if is_final and not provisional:
         if llm_reasoner.enabled:
             with context_lock:
                 context_lines.append(text)
@@ -207,15 +225,23 @@ def on_transcript(text: str, is_final: bool):
             f"{flag['term']} → {flag['definition']}"
         )
 
-    msg = {"type": "final" if is_final else "interim", "text": text, "flags": flags}
+    line_id = _next_line_id() if is_final else None
+    msg = {
+        "type": "final" if is_final else "interim",
+        "id": line_id,
+        "source_id": source_id,
+        "provisional": provisional,
+        "text": text,
+        "flags": flags,
+    }
     with metrics_lock:
         pipeline_state["last_event_at"] = time.time()
         pipeline_state["last_transcript"] = text[-160:]
         pipeline_state["last_transcript_kind"] = "final" if is_final else "interim"
     asyncio.run_coroutine_threadsafe(broadcast(msg), loop)
 
-    if is_final and llm_reasoner.enabled:
-        item = (text, history_snapshot, received_at)
+    if is_final and not provisional and llm_reasoner.enabled:
+        item = (line_id, text, history_snapshot, received_at)
         try:
             ai_queue.put_nowait(item)
             with metrics_lock:
@@ -285,8 +311,87 @@ def tracked_audio_stream(rate: int, chunk_size: int):
         yield chunk
 
 
+def _build_flags(text: str, explanation: dict) -> list[dict]:
+    term = str(explanation.get("term", "")).strip()
+    definition = str(explanation.get("definition", "")).strip()
+    generation = str(explanation.get("target_generation", "unknown")).strip()
+    if not term or not definition:
+        return []
+
+    flags = []
+    for start, end in _find_term_spans(text, term):
+        flags.append(
+            {
+                "term": term,
+                "definition": definition,
+                "generation": generation,
+                "start": start,
+                "end": end,
+            }
+        )
+    return flags
+
+
+def _find_term_spans(text: str, term: str) -> list[tuple[int, int]]:
+    normalized_text, text_map = _normalize_with_map(text)
+    normalized_term, _ = _normalize_with_map(term)
+    if not normalized_text or not normalized_term:
+        return []
+
+    spans = []
+    cursor = 0
+    while True:
+        index = normalized_text.find(normalized_term, cursor)
+        if index < 0:
+            break
+        end_index = index + len(normalized_term)
+        left_ok = index == 0 or not normalized_text[index - 1].isalnum()
+        right_ok = end_index >= len(normalized_text) or not normalized_text[end_index].isalnum()
+        if left_ok and right_ok:
+            start = text_map[index]
+            end = text_map[end_index - 1] + 1
+            spans.append((start, end))
+        cursor = index + len(normalized_term)
+    return spans
+
+
+def _normalize_with_map(text: str) -> tuple[str, list[int]]:
+    normalized_chars: list[str] = []
+    index_map: list[int] = []
+    for index, char in enumerate(text):
+        folded = unicodedata.normalize("NFKD", char)
+        folded = "".join(part for part in folded if not unicodedata.combining(part))
+        folded = folded.lower()
+        for part in folded:
+            normalized_chars.append(part)
+            index_map.append(index)
+    return "".join(normalized_chars), index_map
+
+
+def _contains_disallowed_script(text: str) -> bool:
+    letter_count = 0
+    allowed_count = 0
+    disallowed_count = 0
+    for char in text:
+        if not char.isalpha():
+            continue
+        letter_count += 1
+        char_name = unicodedata.name(char, "")
+        if any(script in char_name for script in config.ALLOWED_TRANSCRIPT_SCRIPTS):
+            allowed_count += 1
+        else:
+            disallowed_count += 1
+    if letter_count == 0:
+        return False
+    if allowed_count == 0:
+        return True
+    if disallowed_count >= 2:
+        return True
+    return (disallowed_count / letter_count) >= 0.2
+
+
 def pipeline_thread():
-    """Run mic → Deepgram → detection in a blocking thread."""
+    """Run mic → OpenAI Realtime transcription in a blocking thread."""
     with metrics_lock:
         pipeline_state["status"] = "starting"
         pipeline_state["last_error"] = None
@@ -302,17 +407,10 @@ def pipeline_thread():
 
     try:
         print("Opening microphone…")
-        if config.TRANSCRIPTION_PROVIDER == "openai":
-            sample_rate = config.OPENAI_AUDIO_RATE
-            chunk_size = config.OPENAI_AUDIO_CHUNK
-            runner = openai_transcriber.run
-            print("Mic ready, connecting to OpenAI Realtime…")
-        else:
-            sample_rate = config.DEEPGRAM_AUDIO_RATE
-            chunk_size = config.DEEPGRAM_AUDIO_CHUNK
-            runner = transcriber.run
-            print("Mic ready, connecting to Deepgram…")
-
+        sample_rate = config.OPENAI_AUDIO_RATE
+        chunk_size = config.OPENAI_AUDIO_CHUNK
+        runner = openai_transcriber.run
+        print("Mic ready, connecting to OpenAI Realtime…")
         mic = tracked_audio_stream(sample_rate, chunk_size)
         with metrics_lock:
             pipeline_state["status"] = "running"
@@ -338,12 +436,12 @@ async def lifespan(app: FastAPI):
     if llm_reasoner.enabled:
         print(
             "AI detector enabled "
-            f"({config.EXPLANATION_PROVIDER}: {llm_reasoner.model})"
+            f"(openai: {llm_reasoner.model})"
         )
     else:
         print(
             "AI detector disabled "
-            f"(missing credentials for {config.EXPLANATION_PROVIDER}, using dictionary fallback)"
+            "(missing OpenAI credentials, using dictionary fallback)"
         )
 
     t = threading.Thread(target=pipeline_thread, daemon=True)
