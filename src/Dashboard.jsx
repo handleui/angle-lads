@@ -527,13 +527,11 @@ export function Dashboard() {
                 <div ref={endRef} />
               </div>
             </div>
-            <div style={fadeBottom} />
           </section>
 
           <aside style={sidePanel(compact)} className="angle-lads-scroll">
             <div style={sideRail(compact)}>
               <section style={heroCard(bannerGeneration)}>
-                <p style={bannerLabel}>Personaje</p>
                 <p style={bannerNameStyle(bannerGeneration)}>{bannerName || "En espera"}</p>
                 <p style={heroNote}>
                   {selectedFlag ? "Detalle fijado desde el transcript." : PRESETS[preset]?.note}
@@ -739,15 +737,8 @@ const bodyGrid = {
   display: "grid",
   alignItems: "start",
   gap: 28,
-  height: "calc(100vh - 186px)",
+  height: "calc(100vh - 118px)",
   minHeight: 0,
-};
-
-const bannerLabel = {
-  margin: 0,
-  fontSize: 12,
-  color: COLORS.muted,
-  letterSpacing: TRACKING,
 };
 
 const bannerNameStyle = (generation) => ({
@@ -771,7 +762,7 @@ const transcriptPanel = (compact) => ({
   overflowY: "auto",
   overscrollBehavior: "contain",
   paddingRight: compact ? 0 : 8,
-  paddingBottom: compact ? 220 : 32,
+  paddingBottom: compact ? 220 : 12,
 });
 
 const transcriptCopy = {
@@ -779,7 +770,8 @@ const transcriptCopy = {
   lineHeight: 1.72,
   color: COLORS.text,
   letterSpacing: TRACKING,
-  paddingBottom: 96,
+  paddingTop: 20,
+  paddingBottom: 40,
 };
 
 const transcriptLine = (active, provisional) => ({
@@ -800,17 +792,6 @@ const fadeTop = {
   right: 0,
   height: 20,
   background: "linear-gradient(180deg, rgba(245,243,239,1) 0%, rgba(245,243,239,0) 100%)",
-  zIndex: 2,
-};
-
-const fadeBottom = {
-  pointerEvents: "none",
-  position: "absolute",
-  left: 0,
-  right: 0,
-  bottom: 0,
-  height: 28,
-  background: "linear-gradient(0deg, rgba(245,243,239,1) 0%, rgba(245,243,239,0) 100%)",
   zIndex: 2,
 };
 
