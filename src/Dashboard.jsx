@@ -5,6 +5,7 @@ const WS_URL = "ws://localhost:8000/ws";
 const METRICS_URL = "http://localhost:8000/metrics";
 const PRESET_URL = "http://localhost:8000/preset";
 const RECONNECT_DELAY_MS = 1000;
+const WS_HEARTBEAT_MS = 15000;
 const METRICS_POLL_MS = 200;
 const TRACKING = "-0.03em";
 const COLORS = {
@@ -175,6 +176,8 @@ export function Dashboard() {
   const [compact, setCompact] = useState(() => window.innerWidth < 980);
   const [presetSyncError, setPresetSyncError] = useState("");
   const endRef = useRef(null);
+  const transcriptRef = useRef(null);
+  const stickToBottomRef = useRef(true);
   const PROVISIONAL_SETTLE_MS = 900;
   const preset = usePresetStore((state) => state.preset);
   const hydrated = usePresetStore((state) => state.hydrated);
@@ -203,7 +206,7 @@ export function Dashboard() {
       return [
         ...prev,
         {
-          id: msg.id,
+          id: msg.id ?? sourceId ?? `line-${Date.now()}`,
           text: msg.text,
           flags: msg.flags ?? [],
           provisional: Boolean(msg.provisional),
@@ -217,7 +220,13 @@ export function Dashboard() {
   useEffect(() => {
     let ws;
     let reconnectTimer;
+    let heartbeatTimer;
     let cancelled = false;
+
+    const clearHeartbeat = () => {
+      window.clearInterval(heartbeatTimer);
+      heartbeatTimer = undefined;
+    };
 
     const connect = () => {
       if (cancelled) return;
@@ -226,10 +235,22 @@ export function Dashboard() {
       ws.onopen = () => {
         setConnected(true);
         setConnectionError("");
+        clearHeartbeat();
+        heartbeatTimer = window.setInterval(() => {
+          if (ws?.readyState !== WebSocket.OPEN) return;
+          try {
+            ws.send('{"type":"ping"}');
+          } catch {
+            ws.close();
+          }
+        }, WS_HEARTBEAT_MS);
       };
 
       ws.onmessage = (event) => {
         const msg = JSON.parse(event.data);
+        if (msg.type === "pong") {
+          return;
+        }
 
         if (msg.type === "final") {
           upsertFinalLine(msg);
@@ -238,7 +259,12 @@ export function Dashboard() {
         }
 
         if (msg.type === "interim") {
-          setInterim(msg.text);
+          if (typeof msg.source_id === "string") {
+            upsertFinalLine({ ...msg, provisional: true, id: msg.id ?? msg.source_id });
+            setInterim("");
+          } else {
+            setInterim(msg.text);
+          }
           return;
         }
 
@@ -264,6 +290,7 @@ export function Dashboard() {
       };
 
       ws.onclose = () => {
+        clearHeartbeat();
         setConnected(false);
         if (cancelled) return;
         setConnectionError("WebSocket no disponible. Esperando backend…");
@@ -275,9 +302,24 @@ export function Dashboard() {
 
     return () => {
       cancelled = true;
+      clearHeartbeat();
       window.clearTimeout(reconnectTimer);
       ws?.close();
     };
+  }, []);
+
+  useEffect(() => {
+    const node = transcriptRef.current;
+    if (!node) return;
+
+    const handleScroll = () => {
+      const distanceFromBottom = node.scrollHeight - node.scrollTop - node.clientHeight;
+      stickToBottomRef.current = distanceFromBottom < 96;
+    };
+
+    handleScroll();
+    node.addEventListener("scroll", handleScroll);
+    return () => node.removeEventListener("scroll", handleScroll);
   }, []);
 
   useEffect(() => {
@@ -373,6 +415,7 @@ export function Dashboard() {
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentional live scroll
   useEffect(() => {
+    if (!stickToBottomRef.current) return;
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [lines, interim]);
 
@@ -461,7 +504,7 @@ export function Dashboard() {
         <div style={layout}>
           <section style={transcriptShell}>
             <div style={fadeTop} />
-            <div style={transcriptPanel(compact)} className="angle-lads-scroll">
+            <div ref={transcriptRef} style={transcriptPanel(compact)} className="angle-lads-scroll">
               <div style={transcriptCopy}>
                 {lines.length === 0 && !interim && (
                   <p style={emptyTranscript}>Habla para empezar a transcribir.</p>
@@ -732,7 +775,7 @@ const transcriptPanel = (compact) => ({
   overflowY: "auto",
   overscrollBehavior: "contain",
   paddingRight: compact ? 0 : 8,
-  paddingBottom: compact ? 220 : 0,
+  paddingBottom: compact ? 220 : 32,
 });
 
 const transcriptCopy = {
@@ -740,7 +783,7 @@ const transcriptCopy = {
   lineHeight: 1.72,
   color: COLORS.text,
   letterSpacing: TRACKING,
-  paddingBottom: 12,
+  paddingBottom: 96,
 };
 
 const transcriptLine = (active, provisional) => ({

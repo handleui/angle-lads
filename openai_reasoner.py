@@ -16,19 +16,19 @@ _RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 _DICTIONARY_WHY = "Se usa aqui como termino coloquial dentro de la conversacion."
 _PRESETS = {
     "cafe": {
-        "min_confidence": 0.88,
+        "min_confidence": 0.8,
         "cooldown_seconds": 50,
         "min_request_seconds": 2.4,
         "context_lines": 3,
     },
     "privado": {
-        "min_confidence": 0.9,
+        "min_confidence": 0.84,
         "cooldown_seconds": 36,
         "min_request_seconds": 1.5,
         "context_lines": 5,
     },
     "focus": {
-        "min_confidence": 0.86,
+        "min_confidence": 0.78,
         "cooldown_seconds": 30,
         "min_request_seconds": 1.2,
         "context_lines": 6,

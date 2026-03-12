@@ -64,6 +64,7 @@ pipeline_state = {
     "transcription_provider": "openai",
     "explanation_provider": "openai",
     "preset": "cafe",
+    "audio_input_device": None,
 }
 AI_QUEUE_MAXSIZE = 8
 line_id_lock = threading.Lock()
@@ -551,12 +552,21 @@ def pipeline_thread():
         pipeline_state["audio_level"] = 0
         pipeline_state["ai_queue_depth"] = 0
         pipeline_state["ai_error"] = None
+        pipeline_state["audio_input_device"] = None
 
     try:
         print("Opening microphone…")
         sample_rate = config.OPENAI_AUDIO_RATE
         chunk_size = config.OPENAI_AUDIO_CHUNK
         runner = openai_transcriber.run
+        device = audio.input_device_info()
+        with metrics_lock:
+            pipeline_state["audio_input_device"] = device
+        print(
+            "Mic selected: "
+            f"{device['name']} (index {device['index']}, "
+            f"default {device['default_sample_rate']} Hz)"
+        )
         print("Mic ready, connecting to OpenAI Realtime…")
         mic = tracked_audio_stream(sample_rate, chunk_size)
         with metrics_lock:
@@ -636,7 +646,9 @@ async def ws(websocket: WebSocket):
     clients.add(websocket)
     try:
         while True:
-            await websocket.receive_text()
+            message = await websocket.receive_text()
+            if message == '{"type":"ping"}':
+                await websocket.send_text('{"type":"pong"}')
     except WebSocketDisconnect:
         clients.discard(websocket)
 

@@ -9,7 +9,7 @@ from websockets.asyncio.client import connect
 import config
 import detector
 
-_REALTIME_URL = "wss://api.openai.com/v1/realtime"
+_REALTIME_URL = "wss://api.openai.com/v1/realtime?intent=transcription"
 _RECONNECT_BASE_SECONDS = 0.25
 _RECONNECT_MAX_SECONDS = 8.0
 _FAILURE_STREAK_RESET_SECONDS = 30.0
@@ -109,7 +109,7 @@ async def _run(on_transcript, audio_iter, on_status):
         "Authorization": f"Bearer {config.OPENAI_API_KEY}",
         "OpenAI-Beta": "realtime=v1",
     }
-    url = f"{_REALTIME_URL}?model={config.OPENAI_REALTIME_SESSION_MODEL}"
+    url = _REALTIME_URL
     partials: dict[str, str] = {}
     ordered_items: list[str] = []
     waiting_children: dict[str | None, list[str]] = {}
@@ -121,7 +121,12 @@ async def _run(on_transcript, audio_iter, on_status):
     async with connect(url, additional_headers=headers, max_size=2**24) as ws:
         _emit_status(on_status, "connecting", None)
         await ws.send(
-            json.dumps({"type": "session.update", "session": _session_config()})
+            json.dumps(
+                {
+                    "type": "transcription_session.update",
+                    "session": _session_config(),
+                }
+            )
         )
         await _await_session_ready(ws)
         _emit_status(on_status, "connected", None)
@@ -222,6 +227,7 @@ async def _receive_loop(
         if event_type.endswith("input_audio_transcription.completed"):
             item_id = message.get("item_id") or "default"
             _cancel_optimistic(optimistic_tasks, item_id)
+            _ensure_ordered_item(item_id, ordered_items)
             text = (
                 message.get("transcript")
                 or message.get("text")
@@ -263,19 +269,14 @@ async def _receive_loop(
 
 def _session_config():
     session = {
-        "type": "transcription",
-        "audio": {
-            "input": {
-                "format": {"type": "audio/pcm", "rate": config.OPENAI_AUDIO_RATE},
-                "noise_reduction": {"type": "near_field"},
-                "transcription": {
-                    "model": config.OPENAI_REALTIME_MODEL,
-                    "language": config.OPENAI_REALTIME_LANGUAGE,
-                    "prompt": _transcription_prompt(),
-                },
-                "turn_detection": _turn_detection_config(),
-            }
+        "input_audio_format": "pcm16",
+        "input_audio_noise_reduction": {"type": "near_field"},
+        "input_audio_transcription": {
+            "model": config.OPENAI_REALTIME_MODEL,
+            "language": config.OPENAI_REALTIME_LANGUAGE,
+            "prompt": _transcription_prompt(),
         },
+        "turn_detection": _turn_detection_config(),
         "include": ["item.input_audio_transcription.logprobs"],
     }
     return session
@@ -286,14 +287,12 @@ def _turn_detection_config():
         return {
             "type": "semantic_vad",
             "eagerness": _CURRENT_VAD_EAGERNESS,
-            "create_response": config.OPENAI_REALTIME_CREATE_RESPONSE,
         }
     return {
         "type": "server_vad",
         "threshold": _CURRENT_VAD_THRESHOLD,
         "prefix_padding_ms": _CURRENT_PREFIX_PADDING_MS,
         "silence_duration_ms": _CURRENT_SILENCE_MS,
-        "create_response": config.OPENAI_REALTIME_CREATE_RESPONSE,
     }
 
 
@@ -334,6 +333,11 @@ def _insert_ordered_item(item_id, previous_item_id, ordered_items, waiting_child
         _insert_ordered_item(child_id, item_id, ordered_items, waiting_children)
 
 
+def _ensure_ordered_item(item_id: str, ordered_items: list[str]):
+    if item_id not in ordered_items:
+        ordered_items.append(item_id)
+
+
 def _flush_completed(
     ordered_items, completed_items, emitted_items, on_transcript, on_status
 ):
@@ -361,9 +365,9 @@ async def _await_session_ready(ws):
     while True:
         message = json.loads(await ws.recv())
         event_type = str(message.get("type", ""))
-        if event_type == "session.updated":
+        if event_type in {"transcription_session.updated", "session.updated"}:
             return
-        if event_type == "session.created":
+        if event_type in {"transcription_session.created", "session.created"}:
             continue
         if event_type == "error":
             error = message.get("error", {})

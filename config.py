@@ -4,6 +4,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def _optional_int(name: str) -> int | None:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return None
+    return int(value)
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_REALTIME_SESSION_MODEL = os.getenv(
     "OPENAI_REALTIME_SESSION_MODEL", "gpt-realtime"
@@ -57,6 +64,8 @@ ALLOWED_TRANSCRIPT_SCRIPTS = {
     for part in os.getenv("ALLOWED_TRANSCRIPT_SCRIPTS", "LATIN").split(",")
     if part.strip()
 }
+AUDIO_INPUT_DEVICE_INDEX = _optional_int("AUDIO_INPUT_DEVICE_INDEX")
+AUDIO_INPUT_DEVICE_NAME = os.getenv("AUDIO_INPUT_DEVICE_NAME", "").strip()
 
 OPENAI_AUDIO_RATE = 24000
 OPENAI_AUDIO_CHUNK = 2400
