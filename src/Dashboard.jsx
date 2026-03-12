@@ -496,11 +496,6 @@ export function Dashboard() {
         {pipelineError && <p style={errorText}>error del pipeline · {pipelineError}</p>}
         {presetSyncError && <p style={errorText}>{presetSyncError}</p>}
 
-        <section style={banner(bannerGeneration)}>
-          <p style={bannerLabel}>Personaje</p>
-          <p style={bannerNameStyle(bannerGeneration)}>{bannerName}</p>
-        </section>
-
         <div style={layout}>
           <section style={transcriptShell}>
             <div style={fadeTop} />
@@ -536,82 +531,94 @@ export function Dashboard() {
           </section>
 
           <aside style={sidePanel(compact)} className="angle-lads-scroll">
-            <section style={contextCard(compact)}>
-              <div style={contextHead}>
-                <div>
-                  <p style={panelTitle}>Contexto</p>
-                  <p style={presetNote}>{PRESETS[preset]?.note}</p>
-                </div>
-                <div style={contextNav}>
-                  <button
-                    type="button"
-                    style={navButton}
-                    onClick={() => {
-                      setSelectedFlag(null);
-                      setActiveExplanationIndex((prev) => Math.max(0, prev - 1));
-                    }}
-                    disabled={activeExplanationIndex === 0}
-                    aria-label="anterior"
-                  >
-                    &#8249;
-                  </button>
-                  <span style={counter}>
-                    {explanations.length === 0
-                      ? "0"
-                      : `${activeExplanationIndex + 1}/${explanations.length}`}
-                  </span>
-                  <button
-                    type="button"
-                    style={navButton}
-                    onClick={() => {
-                      setSelectedFlag(null);
-                      setActiveExplanationIndex((prev) =>
-                        Math.min(explanations.length - 1, prev + 1),
-                      );
-                    }}
-                    disabled={activeExplanationIndex >= explanations.length - 1}
-                    aria-label="siguiente"
-                  >
-                    &#8250;
-                  </button>
-                </div>
-              </div>
-              {pipelineState?.ai_error && <p style={cardMeta}>IA · {pipelineState.ai_error}</p>}
-              {!panelExplanation && !selectedFlag && (
-                <p style={empty}>Esperando un término que valga la pena explicar.</p>
-              )}
-              {selectedFlag && !selectedExplanation && (
-                <article style={entry}>
-                  <div style={tagRow}>
-                    <span style={termTag(selectedFlag.flag.generation)}>
-                      {selectedFlag.flag.term}
-                    </span>
-                    {!compact && <span style={entryMeta}>{selectedFlag.flag.generation}</span>}
-                  </div>
-                  <p style={definition}>{selectedFlag.flag.definition}</p>
-                </article>
-              )}
-              {panelExplanation && (
-                <article style={entry}>
-                  <div style={tagRow}>
-                    <span style={termTag(panelExplanation.target_generation)}>
-                      {panelExplanation.term}
-                    </span>
-                    {!compact && (
+            <div style={sideRail(compact)}>
+              <section style={heroCard(bannerGeneration)}>
+                <p style={bannerLabel}>Personaje</p>
+                <p style={bannerNameStyle(bannerGeneration)}>{bannerName || "En espera"}</p>
+                <p style={heroNote}>
+                  {selectedFlag ? "Detalle fijado desde el transcript." : PRESETS[preset]?.note}
+                </p>
+                {selectedFlag && !selectedExplanation && (
+                  <>
+                    <div style={heroMetaRow}>
+                      <span style={termTag(selectedFlag.flag.generation)}>
+                        {selectedFlag.flag.term}
+                      </span>
+                      <span style={entryMeta}>{selectedFlag.flag.generation}</span>
+                    </div>
+                    <p style={heroDefinition}>{selectedFlag.flag.definition}</p>
+                  </>
+                )}
+                {panelExplanation && (
+                  <>
+                    <div style={heroMetaRow}>
+                      <span style={termTag(panelExplanation.target_generation)}>
+                        {panelExplanation.term}
+                      </span>
                       <span style={entryMeta}>
                         {panelExplanation.target_generation} ·{" "}
                         {(panelExplanation.confidence * 100).toFixed(0)}%
                       </span>
-                    )}
+                    </div>
+                    <p style={heroDefinition}>{panelExplanation.definition}</p>
+                  </>
+                )}
+              </section>
+
+              <section style={contextCard(compact)}>
+                <div style={contextHead}>
+                  <div>
+                    <p style={panelTitle}>Contexto</p>
+                    <p style={presetNote}>{PRESETS[preset]?.note}</p>
                   </div>
-                  <p style={definition}>{panelExplanation.definition}</p>
-                  {!compact && <p style={why}>{panelExplanation.why_in_context}</p>}
-                  {!compact && renderTiming(panelExplanation.timing_ms) && (
-                    <p style={timing}>{renderTiming(panelExplanation.timing_ms)}</p>
-                  )}
-                </article>
-              )}
-            </section>
+                  <div style={contextNav}>
+                    <button
+                      type="button"
+                      style={navButton}
+                      onClick={() => {
+                        setSelectedFlag(null);
+                        setActiveExplanationIndex((prev) => Math.max(0, prev - 1));
+                      }}
+                      disabled={activeExplanationIndex === 0}
+                      aria-label="anterior"
+                    >
+                      &#8249;
+                    </button>
+                    <span style={counter}>
+                      {explanations.length === 0
+                        ? "0"
+                        : `${activeExplanationIndex + 1}/${explanations.length}`}
+                    </span>
+                    <button
+                      type="button"
+                      style={navButton}
+                      onClick={() => {
+                        setSelectedFlag(null);
+                        setActiveExplanationIndex((prev) =>
+                          Math.min(explanations.length - 1, prev + 1),
+                        );
+                      }}
+                      disabled={activeExplanationIndex >= explanations.length - 1}
+                      aria-label="siguiente"
+                    >
+                      &#8250;
+                    </button>
+                  </div>
+                </div>
+                {pipelineState?.ai_error && <p style={cardMeta}>IA · {pipelineState.ai_error}</p>}
+                {!panelExplanation && !selectedFlag && (
+                  <p style={empty}>Esperando un término que valga la pena explicar.</p>
+                )}
+                {panelExplanation && (
+                  <article style={entry}>
+                    {!compact && <p style={why}>{panelExplanation.why_in_context}</p>}
+                    {!compact && renderTiming(panelExplanation.timing_ms) && (
+                      <p style={timing}>{renderTiming(panelExplanation.timing_ms)}</p>
+                    )}
+                  </article>
+                )}
+              </section>
+            </div>
           </aside>
         </div>
       </div>
@@ -733,20 +740,8 @@ const bodyGrid = {
   alignItems: "start",
   gap: 28,
   height: "calc(100vh - 186px)",
+  minHeight: 0,
 };
-
-const banner = (generation) => ({
-  display: "flex",
-  alignItems: "flex-end",
-  justifyContent: "space-between",
-  gap: 12,
-  minHeight: 72,
-  marginBottom: 18,
-  padding: "16px 18px",
-  border: `1px solid ${COLORS.border}`,
-  background: COLORS.panel,
-  color: GEN_COLORS[generation] || COLORS.text,
-});
 
 const bannerLabel = {
   margin: 0,
@@ -757,8 +752,8 @@ const bannerLabel = {
 
 const bannerNameStyle = (generation) => ({
   margin: 0,
-  fontSize: 32,
-  lineHeight: 1,
+  fontSize: 34,
+  lineHeight: 0.95,
   letterSpacing: TRACKING,
   color: GEN_COLORS[generation] || COLORS.text,
 });
@@ -766,6 +761,7 @@ const bannerNameStyle = (generation) => ({
 const transcriptShell = {
   position: "relative",
   minWidth: 0,
+  minHeight: 0,
   height: "100%",
 };
 
@@ -835,8 +831,7 @@ const ghost = {
 const sidePanel = (compact) => ({
   minWidth: 0,
   height: compact ? "auto" : "100%",
-  overflowY: compact ? "visible" : "auto",
-  overscrollBehavior: compact ? "auto" : "contain",
+  overflow: "visible",
   paddingRight: compact ? 16 : 2,
   paddingLeft: compact ? 16 : 0,
   paddingBottom: compact ? 16 : 0,
@@ -847,13 +842,50 @@ const sidePanel = (compact) => ({
   zIndex: compact ? 20 : "auto",
 });
 
+const sideRail = (compact) => ({
+  position: compact ? "relative" : "sticky",
+  top: compact ? "auto" : 0,
+  display: "flex",
+  flexDirection: "column",
+  gap: 14,
+});
+
+const heroCard = (generation) => ({
+  padding: "18px 18px 20px",
+  border: `1px solid ${COLORS.border}`,
+  background: COLORS.panel,
+  color: GEN_COLORS[generation] || COLORS.text,
+});
+
+const heroNote = {
+  margin: "8px 0 0 0",
+  fontSize: 13,
+  lineHeight: 1.55,
+  color: COLORS.muted,
+  letterSpacing: TRACKING,
+};
+
+const heroMetaRow = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 10,
+  flexWrap: "wrap",
+  marginTop: 16,
+};
+
+const heroDefinition = {
+  margin: "14px 0 0 0",
+  fontSize: 20,
+  lineHeight: 1.45,
+  color: COLORS.text,
+  letterSpacing: TRACKING,
+};
+
 const contextCard = (compact) => ({
   padding: compact ? "16px" : "16px 18px 18px",
   border: `1px solid ${COLORS.border}`,
   background: COLORS.panel,
-  borderLeft: `1px solid ${COLORS.border}`,
-  borderRight: `1px solid ${COLORS.border}`,
-  borderBottom: `1px solid ${COLORS.border}`,
   maxHeight: compact ? 176 : "none",
   overflowY: compact ? "auto" : "visible",
   borderRadius: compact ? 14 : 0,
@@ -926,14 +958,6 @@ const entry = {
   marginTop: 18,
 };
 
-const tagRow = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  gap: 12,
-  flexWrap: "wrap",
-};
-
 const termTag = (generation) => ({
   display: "inline-flex",
   alignItems: "center",
@@ -950,14 +974,6 @@ const entryMeta = {
   margin: 0,
   fontSize: 12,
   color: COLORS.muted,
-  letterSpacing: TRACKING,
-};
-
-const definition = {
-  margin: "14px 0 0 0",
-  fontSize: 16,
-  lineHeight: 1.6,
-  color: COLORS.text,
   letterSpacing: TRACKING,
 };
 
