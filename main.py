@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 import audio
 import config
@@ -64,10 +65,33 @@ pipeline_state = {
     "ai_error": None,
     "transcription_provider": "openai",
     "explanation_provider": "openai",
+    "preset": "cafe",
 }
 AI_QUEUE_MAXSIZE = 8
 line_id_lock = threading.Lock()
 line_id_counter = 0
+SPANISH_STOPWORDS = {
+    "de", "la", "el", "que", "y", "en", "no", "se", "es", "un", "una", "por",
+    "para", "con", "como", "pero", "si", "yo", "tu", "me", "te", "lo", "las",
+    "los", "del", "al", "ya", "bien", "porque", "eso", "esta", "este",
+}
+ENGLISH_STOPWORDS = {
+    "the", "and", "you", "that", "this", "with", "for", "not", "are", "was",
+    "have", "just", "but", "they", "your", "out", "what", "all", "like",
+    "can", "will", "from", "stay", "tonight", "okay",
+}
+
+
+class PresetPayload(BaseModel):
+    preset: str
+
+
+def _apply_preset(preset: str) -> str:
+    llm_reasoner.set_preset(preset)
+    openai_transcriber.set_preset(llm_reasoner.preset)
+    with metrics_lock:
+        pipeline_state["preset"] = llm_reasoner.preset
+    return llm_reasoner.preset
 
 
 def _next_line_id() -> int:
@@ -201,7 +225,12 @@ def on_transcript(
 
     received_at = time.perf_counter()
     text = text.strip()
-    if not text or _contains_disallowed_script(text):
+    if (
+        not text
+        or _contains_disallowed_script(text)
+        or _looks_like_dictionary_dump(text)
+        or _looks_unsupported_language(text)
+    ):
         return
     with metrics_lock:
         key = "final_events" if is_final else "interim_events"
@@ -390,6 +419,45 @@ def _contains_disallowed_script(text: str) -> bool:
     return (disallowed_count / letter_count) >= 0.2
 
 
+def _looks_like_dictionary_dump(text: str) -> bool:
+    matches = detector.scan(text)
+    if len(matches) < 6:
+        return False
+
+    distinct_terms = {match["term"] for match in matches}
+    comma_count = text.count(",")
+    covered_chars = sum(match["end"] - match["start"] for match in matches)
+    coverage = covered_chars / max(len(text), 1)
+
+    if len(distinct_terms) >= 6 and comma_count >= 4:
+        return True
+    if len(distinct_terms) >= 5 and coverage >= 0.45:
+        return True
+    return False
+
+
+def _looks_unsupported_language(text: str) -> bool:
+    tokens = [
+        token
+        for token in (
+            "".join(char for char in word.lower() if char.isalpha())
+            for word in text.split()
+        )
+        if token
+    ]
+    if len(tokens) < 4:
+        return False
+    if detector.scan(text):
+        return False
+
+    support = sum(
+        1
+        for token in tokens
+        if token in SPANISH_STOPWORDS or token in ENGLISH_STOPWORDS
+    )
+    return support == 0
+
+
 def pipeline_thread():
     """Run mic → OpenAI Realtime transcription in a blocking thread."""
     with metrics_lock:
@@ -433,6 +501,7 @@ async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
     ai_queue = asyncio.Queue(maxsize=AI_QUEUE_MAXSIZE)
     ai_worker_task = asyncio.create_task(ai_worker())
+    _apply_preset("cafe")
     if llm_reasoner.enabled:
         print(
             "AI detector enabled "
@@ -477,6 +546,12 @@ async def metrics():
         "pipeline": pipeline,
         "latency_ms": _latency_summary(),
     }
+
+
+@app.post("/preset")
+async def set_preset(payload: PresetPayload):
+    preset = payload.preset.strip().lower()
+    return {"preset": _apply_preset(preset)}
 
 
 @app.websocket("/ws")

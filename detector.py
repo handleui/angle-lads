@@ -7,6 +7,8 @@ _DICT_DIR = Path(__file__).parent / "dictionary"
 # (compiled_pattern, canonical_term, info)
 _patterns: list[tuple[re.Pattern, str, dict]] = []
 _terms: list[str] = []
+_exact_terms: dict[str, dict] = {}
+_generation_terms: dict[str, list[str]] = {}
 
 # Conjugation suffixes for Spanglish -ear verbs (regular -ar pattern)
 _EAR_SUFFIXES = [
@@ -95,12 +97,15 @@ def _load():
     """Load all dictionary JSON files and build match patterns."""
     for path in _DICT_DIR.glob("*.json"):
         generation = path.stem
+        _generation_terms.setdefault(generation, [])
         with open(path) as f:
             entries = json.load(f)
         for term, definition in entries.items():
             info = {"definition": definition, "generation": generation}
             term_lower = term.lower()
             _terms.append(term)
+            _exact_terms[term_lower] = info
+            _generation_terms[generation].append(term)
             pattern = _build_pattern(term_lower)
             _patterns.append((re.compile(pattern), term_lower, info))
 
@@ -145,3 +150,28 @@ def transcription_prompt(max_terms: int = 80) -> str:
         seen.add(normalized)
         unique_terms.append(term)
     return ", ".join(unique_terms[:max_terms])
+
+
+def lookup_term(term: str) -> dict | None:
+    if not _patterns:
+        _load()
+    normalized = term.strip().lower()
+    if not normalized:
+        return None
+    info = _exact_terms.get(normalized)
+    if info is None:
+        return None
+    return {
+        "term": normalized,
+        "definition": info["definition"],
+        "generation": info["generation"],
+    }
+
+
+def generation_reference() -> dict[str, list[str]]:
+    if not _patterns:
+        _load()
+    return {
+        generation: list(terms)
+        for generation, terms in _generation_terms.items()
+    }

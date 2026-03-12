@@ -1,7 +1,9 @@
 import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import { PRESETS, usePresetStore } from "./presetStore";
 
 const WS_URL = "ws://localhost:8000/ws";
 const METRICS_URL = "http://localhost:8000/metrics";
+const PRESET_URL = "http://localhost:8000/preset";
 const RECONNECT_DELAY_MS = 1000;
 const METRICS_POLL_MS = 200;
 const TRACKING = "-0.03em";
@@ -23,6 +25,11 @@ const GEN_COLORS = {
   regional: "#0f766e",
   mixed: "#4b5563",
   unknown: "#4b5563",
+};
+const CHARACTER_NAMES = {
+  gen_z: "Tripp",
+  millennial: "Trevor",
+  boomer: "Tina",
 };
 
 function sanitizeFlags(flags) {
@@ -141,37 +148,15 @@ function renderAudioBars(level) {
   });
 }
 
-function CharacterPortrait({ generation = "unknown", compact = false }) {
-  const accent = GEN_COLORS[generation] || COLORS.text;
-  const skin =
-    generation === "boomer" ? "#f4d5b5" : generation === "millennial" ? "#e8c7b4" : "#efd2c2";
-  const hair =
-    generation === "gen_z" ? "#1f2937" : generation === "millennial" ? "#374151" : "#52525b";
-  const bust =
-    generation === "regional" ? "#0f766e" : generation === "millennial" ? "#93c5fd" : "#f5d0a2";
-  const width = compact ? 96 : 132;
-  const height = compact ? 116 : 152;
-
-  return (
-    <svg viewBox="0 0 132 152" width={width} height={height} aria-hidden="true" style={portraitSvg}>
-      <rect x="1" y="1" width="130" height="150" rx="20" fill="#fbf8f2" stroke="#e8e3da" />
-      <circle cx="66" cy="54" r="31" fill={skin} />
-      <path d="M35 54c2-23 15-35 31-35s30 10 32 31c-9-8-18-11-31-11-12 0-23 4-32 15Z" fill={hair} />
-      <circle cx="55" cy="57" r="2.4" fill="#111827" />
-      <circle cx="77" cy="57" r="2.4" fill="#111827" />
-      <path
-        d="M57 73c5 4 13 4 18 0"
-        stroke="#111827"
-        strokeWidth="2.5"
-        strokeLinecap="round"
-        fill="none"
-      />
-      <path d="M34 118c6-21 18-32 32-32 16 0 29 10 35 32" fill={bust} />
-      <path d="M23 138c8-26 23-40 43-40 22 0 37 13 44 40" fill={accent} opacity="0.18" />
-      <circle cx="102" cy="25" r="10" fill={accent} opacity="0.16" />
-      <circle cx="30" cy="31" r="6" fill={accent} opacity="0.1" />
-    </svg>
-  );
+async function pushPreset(preset) {
+  const res = await fetch(PRESET_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ preset }),
+  });
+  if (!res.ok) {
+    throw new Error(`preset returned ${res.status}`);
+  }
 }
 
 export function Dashboard() {
@@ -188,8 +173,12 @@ export function Dashboard() {
   const [activeExplanationIndex, setActiveExplanationIndex] = useState(0);
   const [selectedFlag, setSelectedFlag] = useState(null);
   const [compact, setCompact] = useState(() => window.innerWidth < 980);
+  const [presetSyncError, setPresetSyncError] = useState("");
   const endRef = useRef(null);
-  const PROVISIONAL_SETTLE_MS = 1600;
+  const PROVISIONAL_SETTLE_MS = 900;
+  const preset = usePresetStore((state) => state.preset);
+  const hydrated = usePresetStore((state) => state.hydrated);
+  const setPreset = usePresetStore((state) => state.setPreset);
 
   const upsertFinalLine = useEffectEvent((msg) => {
     setLines((prev) => {
@@ -204,7 +193,7 @@ export function Dashboard() {
             text: msg.text,
             flags: mergeFlags(next[existingIndex].flags, msg.flags ?? []),
             provisional: Boolean(msg.provisional),
-            sourceId,
+            sourceId: msg.provisional ? sourceId : null,
             updatedAt: Date.now(),
           };
           return next;
@@ -218,7 +207,7 @@ export function Dashboard() {
           text: msg.text,
           flags: msg.flags ?? [],
           provisional: Boolean(msg.provisional),
-          sourceId,
+          sourceId: msg.provisional ? sourceId : null,
           updatedAt: Date.now(),
         },
       ];
@@ -298,6 +287,25 @@ export function Dashboard() {
   }, []);
 
   useEffect(() => {
+    if (!hydrated) return;
+    let cancelled = false;
+    pushPreset(preset)
+      .then(() => {
+        if (!cancelled) {
+          setPresetSyncError("");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPresetSyncError("No se pudo sincronizar el preset.");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [hydrated, preset]);
+
+  useEffect(() => {
     let cancelled = false;
 
     const loadMetrics = async () => {
@@ -354,7 +362,7 @@ export function Dashboard() {
             return line;
           }
           changed = true;
-          return { ...line, provisional: false };
+          return { ...line, provisional: false, sourceId: null };
         });
         return changed ? next : prev;
       });
@@ -379,6 +387,9 @@ export function Dashboard() {
       ? explanations[selectedFlag.explanationIndex]
       : null;
   const panelExplanation = selectedFlag ? selectedExplanation : activeExplanation;
+  const bannerGeneration =
+    selectedFlag?.flag.generation ?? panelExplanation?.target_generation ?? null;
+  const bannerName = bannerGeneration ? (CHARACTER_NAMES[bannerGeneration] ?? "") : "";
   const activeLineId = selectedFlag?.lineId ?? panelExplanation?.line_id ?? null;
   const paragraphs = useMemo(() => buildParagraphs(lines), [lines]);
   const layout = useMemo(
@@ -409,9 +420,23 @@ export function Dashboard() {
       `}</style>
       <div style={root}>
         <header style={head}>
-          <div style={headLeft}>
-            <span style={dot(getStatusColor(connected, pipelineError))} />
-            <span style={timestamp}>{time}</span>
+          <div style={headCluster}>
+            <div style={headLeft}>
+              <span style={dot(getStatusColor(connected, pipelineError))} />
+              <span style={timestamp}>{time}</span>
+            </div>
+            <div style={presetRail(compact)}>
+              {Object.entries(PRESETS).map(([key, value]) => (
+                <button
+                  key={key}
+                  type="button"
+                  style={presetButton(preset === key)}
+                  onClick={() => setPreset(key)}
+                >
+                  {value.label}
+                </button>
+              ))}
+            </div>
           </div>
           <div style={statusRail}>
             <div
@@ -426,6 +451,12 @@ export function Dashboard() {
         </header>
 
         {pipelineError && <p style={errorText}>error del pipeline · {pipelineError}</p>}
+        {presetSyncError && <p style={errorText}>{presetSyncError}</p>}
+
+        <section style={banner(bannerGeneration)}>
+          <p style={bannerLabel}>Personaje</p>
+          <p style={bannerNameStyle(bannerGeneration)}>{bannerName}</p>
+        </section>
 
         <div style={layout}>
           <section style={transcriptShell}>
@@ -464,7 +495,10 @@ export function Dashboard() {
           <aside style={sidePanel(compact)} className="angle-lads-scroll">
             <section style={contextCard(compact)}>
               <div style={contextHead}>
-                <p style={panelTitle}>Contexto</p>
+                <div>
+                  <p style={panelTitle}>Contexto</p>
+                  <p style={presetNote}>{PRESETS[preset]?.note}</p>
+                </div>
                 <div style={contextNav}>
                   <button
                     type="button"
@@ -505,12 +539,6 @@ export function Dashboard() {
               )}
               {selectedFlag && !selectedExplanation && (
                 <article style={entry}>
-                  <div style={portraitWrap(compact)}>
-                    <CharacterPortrait
-                      generation={selectedFlag.flag.generation}
-                      compact={compact}
-                    />
-                  </div>
                   <div style={tagRow}>
                     <span style={termTag(selectedFlag.flag.generation)}>
                       {selectedFlag.flag.term}
@@ -522,12 +550,6 @@ export function Dashboard() {
               )}
               {panelExplanation && (
                 <article style={entry}>
-                  <div style={portraitWrap(compact)}>
-                    <CharacterPortrait
-                      generation={panelExplanation.target_generation}
-                      compact={compact}
-                    />
-                  </div>
                   <div style={tagRow}>
                     <span style={termTag(panelExplanation.target_generation)}>
                       {panelExplanation.term}
@@ -577,7 +599,14 @@ const head = {
   alignItems: "center",
   justifyContent: "space-between",
   gap: 24,
-  marginBottom: 18,
+  marginBottom: 14,
+};
+
+const headCluster = {
+  display: "flex",
+  alignItems: "center",
+  gap: 16,
+  flexWrap: "wrap",
 };
 
 const headLeft = {
@@ -607,6 +636,26 @@ const statusRail = {
   alignItems: "center",
   gap: 12,
 };
+
+const presetRail = (compact) => ({
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+  flexWrap: "wrap",
+  marginLeft: compact ? 0 : 6,
+});
+
+const presetButton = (active) => ({
+  border: `1px solid ${active ? COLORS.text : COLORS.border}`,
+  background: active ? COLORS.text : "transparent",
+  color: active ? "#f8f6f2" : COLORS.muted,
+  height: 26,
+  padding: "0 9px",
+  fontSize: 12,
+  letterSpacing: TRACKING,
+  cursor: "pointer",
+  borderRadius: 999,
+});
 
 const statusText = {
   margin: 0,
@@ -640,8 +689,36 @@ const bodyGrid = {
   display: "grid",
   alignItems: "start",
   gap: 28,
-  height: "calc(100vh - 120px)",
+  height: "calc(100vh - 186px)",
 };
+
+const banner = (generation) => ({
+  display: "flex",
+  alignItems: "flex-end",
+  justifyContent: "space-between",
+  gap: 12,
+  minHeight: 72,
+  marginBottom: 18,
+  padding: "16px 18px",
+  border: `1px solid ${COLORS.border}`,
+  background: COLORS.panel,
+  color: GEN_COLORS[generation] || COLORS.text,
+});
+
+const bannerLabel = {
+  margin: 0,
+  fontSize: 12,
+  color: COLORS.muted,
+  letterSpacing: TRACKING,
+};
+
+const bannerNameStyle = (generation) => ({
+  margin: 0,
+  fontSize: 32,
+  lineHeight: 1,
+  letterSpacing: TRACKING,
+  color: GEN_COLORS[generation] || COLORS.text,
+});
 
 const transcriptShell = {
   position: "relative",
@@ -753,6 +830,14 @@ const panelTitle = {
   letterSpacing: TRACKING,
 };
 
+const presetNote = {
+  margin: "4px 0 0 0",
+  fontSize: 12,
+  color: COLORS.muted,
+  letterSpacing: TRACKING,
+  lineHeight: 1.45,
+};
+
 const contextNav = {
   display: "flex",
   alignItems: "center",
@@ -796,15 +881,6 @@ const empty = {
 
 const entry = {
   marginTop: 18,
-};
-
-const portraitWrap = (compact) => ({
-  marginBottom: compact ? 12 : 16,
-});
-
-const portraitSvg = {
-  display: "block",
-  maxWidth: "100%",
 };
 
 const tagRow = {

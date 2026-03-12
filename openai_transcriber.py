@@ -7,12 +7,63 @@ import random
 from websockets.asyncio.client import connect
 
 import config
-import detector
 
 _REALTIME_URL = "wss://api.openai.com/v1/realtime"
 _RECONNECT_BASE_SECONDS = 0.25
 _RECONNECT_MAX_SECONDS = 8.0
 _FAILURE_STREAK_RESET_SECONDS = 30.0
+_CURRENT_VAD_MODE = config.OPENAI_REALTIME_VAD_MODE
+_CURRENT_VAD_EAGERNESS = config.OPENAI_REALTIME_VAD_EAGERNESS
+_CURRENT_VAD_THRESHOLD = config.OPENAI_REALTIME_VAD_THRESHOLD
+_CURRENT_PREFIX_PADDING_MS = config.OPENAI_REALTIME_PREFIX_PADDING_MS
+_CURRENT_SILENCE_MS = config.OPENAI_REALTIME_SILENCE_MS
+_CURRENT_OPTIMISTIC_FINAL_MS = config.OPENAI_REALTIME_OPTIMISTIC_FINAL_MS
+_PRESETS = {
+    "cafe": {
+        "vad_mode": "server_vad",
+        "vad_threshold": 0.7,
+        "prefix_padding_ms": 140,
+        "silence_ms": 260,
+        "optimistic_final_ms": 340,
+    },
+    "privado": {
+        "vad_mode": "server_vad",
+        "vad_threshold": 0.58,
+        "prefix_padding_ms": 200,
+        "silence_ms": 340,
+        "optimistic_final_ms": 430,
+    },
+    "focus": {
+        "vad_mode": "semantic_vad",
+        "vad_eagerness": "high",
+        "optimistic_final_ms": 380,
+    },
+}
+
+
+def set_preset(preset: str):
+    global _CURRENT_VAD_MODE
+    global _CURRENT_VAD_EAGERNESS
+    global _CURRENT_VAD_THRESHOLD
+    global _CURRENT_PREFIX_PADDING_MS
+    global _CURRENT_SILENCE_MS
+    global _CURRENT_OPTIMISTIC_FINAL_MS
+
+    selected = _PRESETS.get(preset, _PRESETS["cafe"])
+    _CURRENT_VAD_MODE = selected.get("vad_mode", config.OPENAI_REALTIME_VAD_MODE)
+    _CURRENT_VAD_EAGERNESS = selected.get(
+        "vad_eagerness", config.OPENAI_REALTIME_VAD_EAGERNESS
+    )
+    _CURRENT_VAD_THRESHOLD = selected.get(
+        "vad_threshold", config.OPENAI_REALTIME_VAD_THRESHOLD
+    )
+    _CURRENT_PREFIX_PADDING_MS = selected.get(
+        "prefix_padding_ms", config.OPENAI_REALTIME_PREFIX_PADDING_MS
+    )
+    _CURRENT_SILENCE_MS = selected.get("silence_ms", config.OPENAI_REALTIME_SILENCE_MS)
+    _CURRENT_OPTIMISTIC_FINAL_MS = selected.get(
+        "optimistic_final_ms", config.OPENAI_REALTIME_OPTIMISTIC_FINAL_MS
+    )
 
 
 def run(on_transcript, audio_chunks, on_status=None):
@@ -176,8 +227,6 @@ async def _receive_loop(
 
 
 def _session_config():
-    dictionary_prompt = detector.transcription_prompt(config.OPENAI_REALTIME_DICTIONARY_TERMS)
-    prompt_parts = [part for part in [dictionary_prompt, config.OPENAI_REALTIME_PROMPT] if part]
     session = {
         "input_audio_format": "pcm16",
         "input_audio_noise_reduction": {"type": "near_field"},
@@ -187,23 +236,21 @@ def _session_config():
         },
         "turn_detection": _turn_detection_config(),
     }
-    if prompt_parts:
-        session["input_audio_transcription"]["prompt"] = "\n".join(prompt_parts)
     return session
 
 
 def _turn_detection_config():
-    if config.OPENAI_REALTIME_VAD_MODE == "semantic_vad":
+    if _CURRENT_VAD_MODE == "semantic_vad":
         return {
             "type": "semantic_vad",
-            "eagerness": config.OPENAI_REALTIME_VAD_EAGERNESS,
+            "eagerness": _CURRENT_VAD_EAGERNESS,
             "create_response": config.OPENAI_REALTIME_CREATE_RESPONSE,
         }
     return {
         "type": "server_vad",
-        "threshold": config.OPENAI_REALTIME_VAD_THRESHOLD,
-        "prefix_padding_ms": config.OPENAI_REALTIME_PREFIX_PADDING_MS,
-        "silence_duration_ms": config.OPENAI_REALTIME_SILENCE_MS,
+        "threshold": _CURRENT_VAD_THRESHOLD,
+        "prefix_padding_ms": _CURRENT_PREFIX_PADDING_MS,
+        "silence_duration_ms": _CURRENT_SILENCE_MS,
         "create_response": config.OPENAI_REALTIME_CREATE_RESPONSE,
     }
 
@@ -215,7 +262,7 @@ async def _emit_optimistic_final(
     emitted_items: set[str],
     on_transcript,
 ):
-    await asyncio.sleep(config.OPENAI_REALTIME_OPTIMISTIC_FINAL_MS / 1000)
+    await asyncio.sleep(_CURRENT_OPTIMISTIC_FINAL_MS / 1000)
     if item_id in emitted_items or item_id in completed_items:
         return
     text = partials.get(item_id, "").strip()

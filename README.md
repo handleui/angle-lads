@@ -45,6 +45,7 @@ Latency and counters are available at `http://localhost:8000/metrics`.
 - Live transcript with clickable highlighted terms
 - Context panel with per-generation portrait previews
 - Mobile bottom sheet layout for definitions and context
+- Preset switching in the UI for `cafe`, `privado`, and `focus`, affecting both transcription and explanation behavior
 
 ## Environment
 
@@ -54,8 +55,6 @@ Optional tuning:
 
 - `OPENAI_REALTIME_MODEL` (default: `gpt-4o-mini-transcribe`)
 - `OPENAI_REALTIME_LANGUAGE`
-- `OPENAI_REALTIME_PROMPT`
-- `OPENAI_REALTIME_DICTIONARY_TERMS`
 - `ALLOWED_TRANSCRIPT_SCRIPTS` (default: `LATIN`)
 - `OPENAI_REALTIME_VAD_THRESHOLD`
 - `OPENAI_REALTIME_PREFIX_PADDING_MS`
@@ -65,5 +64,4 @@ Optional tuning:
 - `OPENAI_TEXT_TIMEOUT_SECONDS`
 - `OPENAI_MIN_REQUEST_SECONDS`
 
-For OpenAI Realtime, leave `OPENAI_REALTIME_PROMPT` empty unless you have a specific need to bias transcription. Strong prompts can leak into the transcript itself. The app already constrains output to Latin-script transcript text, which helps suppress accidental non-Spanish/non-English script output.
-The app also injects a compact keyword prompt built from `dictionary/*.json`, which helps rare local slang survive transcription and keeps your own definitions preferred before the explainer falls back to AI.
+The app constrains output to Latin-script transcript text, which helps suppress accidental non-Spanish/non-English script output.
