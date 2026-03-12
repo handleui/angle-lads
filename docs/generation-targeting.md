@@ -58,6 +58,9 @@ Typical intent:
 
 The explainer in `openai_reasoner.py` is currently tuned like this:
 
+- If the latest line contains a known dictionary term, that term is treated as already valid and eligible to flag.
+- For known dictionary terms, the dictionary stays authoritative for the term, definition, and generation.
+- In that known-term path, the model is only asked to explain why the term was used in the conversation.
 - It assumes the conversation is usually intra-generational.
 - It does not flag a word just because it sounds young.
 - It tries to flag the one short term or expression that is actually confusing in that moment.

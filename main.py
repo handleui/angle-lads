@@ -202,44 +202,47 @@ async def analyze_and_broadcast(
     line_id: int, text: str, history_snapshot: list[str], final_received_at: float
 ):
     llm_started_at = time.perf_counter()
-    explanation = await asyncio.to_thread(llm_reasoner.explain, text, history_snapshot)
+    explanations = await asyncio.to_thread(
+        llm_reasoner.explain_many, text, history_snapshot
+    )
     llm_roundtrip_ms = int((time.perf_counter() - llm_started_at) * 1000)
     final_to_explanation_ms = int((time.perf_counter() - final_received_at) * 1000)
 
-    if explanation is None:
+    if not explanations:
         with metrics_lock:
             pipeline_state["ai_error"] = llm_reasoner.last_error
         return
 
-    flags = _build_flags(text, explanation)
-
     avg_llm_ms = _record_latency("llm_roundtrip_ms", llm_roundtrip_ms)
     avg_e2e_ms = _record_latency("final_to_explanation_ms", final_to_explanation_ms)
     with metrics_lock:
-        pipeline_counts["explanations_emitted"] += 1
+        pipeline_counts["explanations_emitted"] += len(explanations)
         pipeline_state["ai_error"] = None
-    print(
-        "[ai] "
-        f"{explanation['term']} ({explanation['target_generation']}, "
-        f"{explanation['confidence']:.2f}) "
-        f"llm={llm_roundtrip_ms}ms e2e={final_to_explanation_ms}ms "
-        f"(avg llm={avg_llm_ms}ms avg e2e={avg_e2e_ms}ms)"
-    )
-    await broadcast(
-        {
-            "type": "explanation",
-            "line_id": line_id,
-            "text": text,
-            "flags": flags,
-            "timing_ms": {
-                "llm_roundtrip": llm_roundtrip_ms,
-                "final_to_explanation": final_to_explanation_ms,
-                "avg_llm_roundtrip": avg_llm_ms,
-                "avg_final_to_explanation": avg_e2e_ms,
+
+    for explanation in explanations:
+        flags = _build_flags(text, explanation)
+        print(
+            "[ai] "
+            f"{explanation['term']} ({explanation['target_generation']}, "
+            f"{explanation['confidence']:.2f}) "
+            f"llm={llm_roundtrip_ms}ms e2e={final_to_explanation_ms}ms "
+            f"(avg llm={avg_llm_ms}ms avg e2e={avg_e2e_ms}ms)"
+        )
+        await broadcast(
+            {
+                "type": "explanation",
+                "line_id": line_id,
+                "text": text,
+                "flags": flags,
+                "timing_ms": {
+                    "llm_roundtrip": llm_roundtrip_ms,
+                    "final_to_explanation": final_to_explanation_ms,
+                    "avg_llm_roundtrip": avg_llm_ms,
+                    "avg_final_to_explanation": avg_e2e_ms,
+                },
+                **explanation,
             },
-            **explanation,
-        }
-    )
+        )
 
 
 async def ai_worker():

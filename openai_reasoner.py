@@ -77,6 +77,35 @@ _OUTPUT_SCHEMA = {
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
     },
 }
+_KNOWN_TERMS_OUTPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["items"],
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "term",
+                    "why_in_context",
+                    "usage_mode",
+                    "confidence",
+                ],
+                "properties": {
+                    "term": {"type": "string"},
+                    "why_in_context": {"type": "string"},
+                    "usage_mode": {
+                        "type": "string",
+                        "enum": ["colloquial", "literal", "unclear", "none"],
+                    },
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                },
+            },
+        }
+    },
+}
 
 
 def max_context_lines() -> int:
@@ -120,20 +149,47 @@ class OpenAIContextReasoner:
         self.context_lines = selected["context_lines"]
 
     def explain(self, latest_line: str, history: list[str]) -> dict | None:
+        explanations = self.explain_many(latest_line, history)
+        return explanations[0] if explanations else None
+
+    def explain_many(self, latest_line: str, history: list[str]) -> list[dict]:
         if not self.enabled:
-            return self._explain_from_dictionary(latest_line)
+            return self._explain_many_from_dictionary(latest_line)
 
         self.last_error = None
+        dictionary_matches = [
+            match
+            for match in self._pick_dictionary_matches(latest_line)
+            if self._passes_cooldown(match["term"])
+        ]
+        if dictionary_matches:
+            if not self._wait_for_request_slot():
+                return [
+                    self._build_dictionary_explanation(match, _DICTIONARY_WHY)
+                    for match in dictionary_matches
+                ]
+            explanations = self._explain_known_terms(
+                dictionary_matches,
+                latest_line,
+                history,
+            )
+            if explanations:
+                return explanations
+            return [
+                self._build_dictionary_explanation(match, _DICTIONARY_WHY)
+                for match in dictionary_matches
+            ]
+
         if not self._wait_for_request_slot():
-            return None
+            return []
 
         text = self._generate_json(latest_line, history)
         if text is None:
-            return None
+            return []
 
         parsed = self._parse_json(text)
         if parsed is None or not parsed.get("should_flag"):
-            return None
+            return []
 
         term = str(parsed.get("term", "")).strip()
         definition = str(parsed.get("definition", "")).strip()
@@ -144,33 +200,23 @@ class OpenAIContextReasoner:
         confidence = _to_float(parsed.get("confidence"))
 
         if not term or not definition or not why:
-            return None
+            return []
         if confidence < self.min_confidence:
-            return None
+            return []
         if term_kind in {"none", "nickname", "proper_noun", "unclear"}:
-            return None
+            return []
         if usage_mode in {"none", "unclear"}:
-            return None
+            return []
         if target_generation == "unknown":
-            return None
+            return []
         if not self._is_valid_term(term, latest_line):
-            return None
+            return []
         if not self._passes_cooldown(term):
-            return None
+            return []
 
         dictionary_entry = detector.lookup_term(term)
         if dictionary_entry is not None:
-            explanation = {
-                "term": dictionary_entry["term"],
-                "definition": dictionary_entry["definition"],
-                "why_in_context": why,
-                "target_generation": _fallback_generation(
-                    dictionary_entry["generation"]
-                ),
-                "confidence": 1.0,
-                "model": "dictionary",
-                "source": "dictionary",
-            }
+            explanation = self._build_dictionary_explanation(dictionary_entry, why)
         else:
             explanation = {
                 "term": term,
@@ -181,22 +227,106 @@ class OpenAIContextReasoner:
                 "model": self.model,
                 "source": "ai",
             }
-        return explanation
+        return [explanation]
 
     def _explain_from_dictionary(self, latest_line: str) -> dict | None:
-        dictionary_flags = detector.scan(latest_line)
-        if dictionary_flags:
-            match = dictionary_flags[0]
-            return {
-                "term": match["term"],
-                "definition": match["definition"],
-                "why_in_context": _DICTIONARY_WHY,
-                "target_generation": _fallback_generation(match["generation"]),
-                "confidence": 1.0,
-                "model": "dictionary",
-                "source": "dictionary",
-            }
-        return self._cache.lookup(latest_line)
+        explanations = self._explain_many_from_dictionary(latest_line)
+        return explanations[0] if explanations else None
+
+    def _explain_many_from_dictionary(self, latest_line: str) -> list[dict]:
+        matches = self._pick_dictionary_matches(latest_line)
+        if matches:
+            return [
+                self._build_dictionary_explanation(match, _DICTIONARY_WHY)
+                for match in matches
+            ]
+        cached = self._cache.lookup(latest_line)
+        return [cached] if cached is not None else []
+
+    def _pick_dictionary_matches(self, latest_line: str) -> list[dict]:
+        matches = [
+            match
+            for match in detector.scan(latest_line)
+            if is_cacheable_term(match.get("term", ""))
+        ]
+        if not matches:
+            return []
+        matches.sort(
+            key=lambda match: (
+                match["start"],
+                -(match["end"] - match["start"]),
+            )
+        )
+        selected = []
+        last_end = -1
+        seen_terms = set()
+        for match in matches:
+            term = _normalize_term(match["term"])
+            if match["start"] < last_end or term in seen_terms:
+                continue
+            selected.append(match)
+            seen_terms.add(term)
+            last_end = match["end"]
+        return selected[:3]
+
+    def _build_dictionary_explanation(self, match: dict, why: str) -> dict:
+        return {
+            "term": match["term"],
+            "definition": match["definition"],
+            "why_in_context": why,
+            "target_generation": _fallback_generation(match["generation"]),
+            "confidence": 1.0,
+            "model": "dictionary",
+            "source": "dictionary",
+        }
+
+    def _explain_known_terms(
+        self,
+        matches: list[dict],
+        latest_line: str,
+        history: list[str],
+    ) -> list[dict]:
+        text = self._generate_known_terms_json(matches, latest_line, history)
+        if text is None:
+            return []
+        parsed = self._parse_json(text)
+        if parsed is None:
+            return []
+        items = parsed.get("items")
+        if not isinstance(items, list):
+            return []
+
+        by_term = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            normalized = _normalize_term(str(item.get("term", "")))
+            if not normalized:
+                continue
+            by_term[normalized] = item
+
+        explanations = []
+        for match in matches:
+            item = by_term.get(_normalize_term(match["term"]))
+            if not isinstance(item, dict):
+                explanations.append(
+                    self._build_dictionary_explanation(match, _DICTIONARY_WHY)
+                )
+                continue
+            why = str(item.get("why_in_context", "")).strip()
+            usage_mode = str(item.get("usage_mode", "none")).strip()
+            confidence = _to_float(item.get("confidence"))
+            if (
+                not why
+                or usage_mode in {"none", "unclear"}
+                or confidence < self.min_confidence
+            ):
+                explanations.append(
+                    self._build_dictionary_explanation(match, _DICTIONARY_WHY)
+                )
+                continue
+            explanations.append(self._build_dictionary_explanation(match, why))
+        return explanations
 
     def _is_valid_term(self, term: str, latest_line: str) -> bool:
         normalized = _normalize_term(term)
@@ -335,6 +465,62 @@ class OpenAIContextReasoner:
                     "name": "colloquial_term_explanation",
                     "strict": True,
                     "schema": _OUTPUT_SCHEMA,
+                }
+            },
+        }
+        data = json.dumps(payload).encode("utf-8")
+        decoded = self._request_with_retry(data)
+        if decoded is None:
+            return None
+        return _extract_output_text(decoded)
+
+    def _generate_known_terms_json(
+        self,
+        matches: list[dict],
+        latest_line: str,
+        history: list[str],
+    ) -> str | None:
+        history_text = "\n".join(f"- {line}" for line in history[-self.context_lines :])
+        fixed_terms = "\n".join(
+            (
+                f"- term: {match['term']}\n"
+                f"  definition: {match['definition']}\n"
+                f"  generation: {_fallback_generation(match['generation'])}"
+            )
+            for match in matches
+        )
+        instructions = (
+            "Eres un interprete sociolinguistico de espanol mexicano y spanglish. "
+            "Ya se detectaron uno o varios terminos validos del diccionario local. "
+            "NO decidas si deben marcarse o no: ya deben marcarse. "
+            "Devuelve un item por cada termino dado y no inventes terminos nuevos. "
+            "Tu tarea es explicar por que se uso cada termino en esta "
+            "conversacion y en esta frase. "
+            "No cambies los terminos, no cambies las generaciones, no redefinas las "
+            "palabras fuera de este contexto. "
+            "why_in_context debe ser breve, claro y situacional para cada termino. "
+            "Si ayuda, menciona el tono, tema o intencion de la frase. "
+            "usage_mode debe ser colloquial o literal segun el uso en la frase. "
+            "Usa espanol claro y breve."
+        )
+        prompt = (
+            f"Terminos fijados:\n{fixed_terms}\n\n"
+            f"Conversacion reciente:\n{history_text}\n\n"
+            f"Ultima frase:\n{latest_line}\n"
+        )
+        payload = {
+            "model": self.model,
+            "instructions": instructions,
+            "input": prompt,
+            "store": False,
+            "temperature": 0,
+            "max_output_tokens": 120,
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "known_terms_context_explanation",
+                    "strict": True,
+                    "schema": _KNOWN_TERMS_OUTPUT_SCHEMA,
                 }
             },
         }
