@@ -1,31 +1,56 @@
 import json
 import re
+import threading
 from pathlib import Path
 
 _DICT_DIR = Path(__file__).parent / "dictionary"
+_WORD_RE = re.compile(r"[0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ][0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ'_-]*")
+_LOAD_LOCK = threading.Lock()
+_GENERATION_ALIASES = {
+    "regional": "boomer",
+}
 
-# (compiled_pattern, canonical_term, info)
-_patterns: list[tuple[re.Pattern, str, dict]] = []
+_exact_phrase_map: dict[str, dict] = {}
+_regex_patterns: list[tuple[re.Pattern, str, dict]] = []
 _terms: list[str] = []
 _exact_terms: dict[str, dict] = {}
 _generation_terms: dict[str, list[str]] = {}
+_max_term_words = 1
+_REFERENCE_GENERATIONS = ("boomer", "millennial", "gen_z")
 
 # Conjugation suffixes for Spanglish -ear verbs (regular -ar pattern)
 _EAR_SUFFIXES = [
     # infinitive
     "ear",
     # present indicative (yo / tú / vos / él / nosotros / ellos)
-    "eo", "eas", "eás", "ea", "eamos", "ean",
+    "eo",
+    "eas",
+    "eás",
+    "ea",
+    "eamos",
+    "ean",
     # preterite
-    "eé", "easte", "eó", "earon",
+    "eé",
+    "easte",
+    "eó",
+    "earon",
     # imperfect
-    "eaba", "eabas", "eábamos", "eaban",
+    "eaba",
+    "eabas",
+    "eábamos",
+    "eaban",
     # gerund
     "eando",
     # past participle (masc/fem × sing/pl)
-    "eado", "eada", "eados", "eadas",
+    "eado",
+    "eada",
+    "eados",
+    "eadas",
     # present subjunctive
-    "ee", "ees", "eemos", "een",
+    "ee",
+    "ees",
+    "eemos",
+    "een",
 ]
 
 
@@ -87,16 +112,23 @@ def _build_pattern(term: str) -> str:
     if len(all_forms) == 1:
         return r"\b" + re.escape(term) + r"\b"
 
-    alts = "|".join(
-        re.escape(f) for f in sorted(all_forms, key=len, reverse=True)
-    )
+    alts = "|".join(re.escape(f) for f in sorted(all_forms, key=len, reverse=True))
     return rf"\b(?:{alts})\b"
+
+
+def _requires_regex(term: str) -> bool:
+    if term.endswith("ear") and len(term) > 3:
+        return True
+    if term.endswith("o") and len(term) > 4:
+        return True
+    return bool(_phonetic_variants(term))
 
 
 def _load():
     """Load all dictionary JSON files and build match patterns."""
+    global _max_term_words
     for path in _DICT_DIR.glob("*.json"):
-        generation = path.stem
+        generation = _GENERATION_ALIASES.get(path.stem, path.stem)
         _generation_terms.setdefault(generation, [])
         with open(path) as f:
             entries = json.load(f)
@@ -106,8 +138,20 @@ def _load():
             _terms.append(term)
             _exact_terms[term_lower] = info
             _generation_terms[generation].append(term)
-            pattern = _build_pattern(term_lower)
-            _patterns.append((re.compile(pattern), term_lower, info))
+            _max_term_words = max(_max_term_words, len(term_lower.split()))
+            if _requires_regex(term_lower):
+                pattern = _build_pattern(term_lower)
+                _regex_patterns.append((re.compile(pattern), term_lower, info))
+            else:
+                _exact_phrase_map[term_lower] = info
+
+
+def _ensure_loaded():
+    if _terms:
+        return
+    with _LOAD_LOCK:
+        if not _terms:
+            _load()
 
 
 def scan(text: str) -> list[dict]:
@@ -116,13 +160,11 @@ def scan(text: str) -> list[dict]:
     Returns a list of matches:
       [{"term": str, "definition": str, "generation": str, "start": int, "end": int}]
     """
-    if not _patterns:
-        _load()
+    _ensure_loaded()
 
     text_lower = text.lower()
-    matches = []
-
-    for regex, term, info in _patterns:
+    matches = _scan_exact_terms(text_lower)
+    for regex, term, info in _regex_patterns:
         for m in regex.finditer(text_lower):
             matches.append(
                 {
@@ -139,8 +181,7 @@ def scan(text: str) -> list[dict]:
 
 
 def transcription_prompt(max_terms: int = 80) -> str:
-    if not _patterns:
-        _load()
+    _ensure_loaded()
     unique_terms = []
     seen = set()
     for term in _terms:
@@ -153,8 +194,7 @@ def transcription_prompt(max_terms: int = 80) -> str:
 
 
 def lookup_term(term: str) -> dict | None:
-    if not _patterns:
-        _load()
+    _ensure_loaded()
     normalized = term.strip().lower()
     if not normalized:
         return None
@@ -169,9 +209,35 @@ def lookup_term(term: str) -> dict | None:
 
 
 def generation_reference() -> dict[str, list[str]]:
-    if not _patterns:
-        _load()
+    _ensure_loaded()
     return {
-        generation: list(terms)
-        for generation, terms in _generation_terms.items()
+        generation: list(_generation_terms.get(generation, []))
+        for generation in _REFERENCE_GENERATIONS
     }
+
+
+def _scan_exact_terms(text_lower: str) -> list[dict]:
+    if not _exact_phrase_map:
+        return []
+
+    tokens = list(_WORD_RE.finditer(text_lower))
+    if not tokens:
+        return []
+
+    matches = []
+    for size in range(1, min(_max_term_words, len(tokens)) + 1):
+        for start in range(len(tokens) - size + 1):
+            phrase = " ".join(token.group(0) for token in tokens[start : start + size])
+            info = _exact_phrase_map.get(phrase)
+            if info is None:
+                continue
+            matches.append(
+                {
+                    "term": phrase,
+                    "definition": info["definition"],
+                    "generation": info["generation"],
+                    "start": tokens[start].start(),
+                    "end": tokens[start + size - 1].end(),
+                }
+            )
+    return matches

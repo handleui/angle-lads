@@ -1,9 +1,9 @@
 import asyncio
 import json
 import math
-import traceback
 import threading
 import time
+import traceback
 import unicodedata
 from array import array
 from collections import deque
@@ -24,7 +24,6 @@ GEN_COLORS = {
     "gen_z": "\033[94m",
     "millennial": "\033[95m",
     "boomer": "\033[93m",
-    "regional": "\033[96m",
 }
 
 clients: set[WebSocket] = set()
@@ -34,10 +33,9 @@ ai_queue: asyncio.Queue | None = None
 pending_ai_item = None
 pending_ai_lock = threading.Lock()
 context_lock = threading.Lock()
-context_lines = deque(maxlen=config.GEMINI_CONTEXT_LINES)
-llm_reasoner = (
-    openai_reasoner.OpenAIContextReasoner()
-)
+CONTEXT_BUFFER_MAX = openai_reasoner.max_context_lines()
+context_lines = deque(maxlen=CONTEXT_BUFFER_MAX)
+llm_reasoner = openai_reasoner.OpenAIContextReasoner()
 metrics_lock = threading.Lock()
 service_started_at = time.time()
 latency_samples = {
@@ -54,8 +52,8 @@ pipeline_counts = {
 pipeline_state = {
     "status": "idle",
     "last_error": None,
-    "deepgram_status": "idle",
-    "deepgram_detail": None,
+    "transcription_status": "idle",
+    "transcription_detail": None,
     "last_event_at": None,
     "last_transcript": None,
     "last_transcript_kind": None,
@@ -71,14 +69,65 @@ AI_QUEUE_MAXSIZE = 8
 line_id_lock = threading.Lock()
 line_id_counter = 0
 SPANISH_STOPWORDS = {
-    "de", "la", "el", "que", "y", "en", "no", "se", "es", "un", "una", "por",
-    "para", "con", "como", "pero", "si", "yo", "tu", "me", "te", "lo", "las",
-    "los", "del", "al", "ya", "bien", "porque", "eso", "esta", "este",
+    "de",
+    "la",
+    "el",
+    "que",
+    "y",
+    "en",
+    "no",
+    "se",
+    "es",
+    "un",
+    "una",
+    "por",
+    "para",
+    "con",
+    "como",
+    "pero",
+    "si",
+    "yo",
+    "tu",
+    "me",
+    "te",
+    "lo",
+    "las",
+    "los",
+    "del",
+    "al",
+    "ya",
+    "bien",
+    "porque",
+    "eso",
+    "esta",
+    "este",
 }
 ENGLISH_STOPWORDS = {
-    "the", "and", "you", "that", "this", "with", "for", "not", "are", "was",
-    "have", "just", "but", "they", "your", "out", "what", "all", "like",
-    "can", "will", "from", "stay", "tonight", "okay",
+    "the",
+    "and",
+    "you",
+    "that",
+    "this",
+    "with",
+    "for",
+    "not",
+    "are",
+    "was",
+    "have",
+    "just",
+    "but",
+    "they",
+    "your",
+    "out",
+    "what",
+    "all",
+    "like",
+    "can",
+    "will",
+    "from",
+    "stay",
+    "tonight",
+    "okay",
 }
 
 
@@ -199,7 +248,9 @@ async def ai_worker():
             if item is None:
                 break
             line_id, text, history_snapshot, final_received_at = item
-            await analyze_and_broadcast(line_id, text, history_snapshot, final_received_at)
+            await analyze_and_broadcast(
+                line_id, text, history_snapshot, final_received_at
+            )
             while True:
                 with pending_ai_lock:
                     pending = pending_ai_item
@@ -218,6 +269,7 @@ def on_transcript(
     is_final: bool,
     provisional: bool = False,
     source_id: str | None = None,
+    metadata: dict | None = None,
 ):
     global pending_ai_item
     if loop is None:
@@ -227,6 +279,7 @@ def on_transcript(
     text = text.strip()
     if (
         not text
+        or _is_low_confidence_transcript(text, is_final, provisional, metadata)
         or _contains_disallowed_script(text)
         or _looks_like_dictionary_dump(text)
         or _looks_unsupported_language(text)
@@ -243,7 +296,7 @@ def on_transcript(
         if llm_reasoner.enabled:
             with context_lock:
                 context_lines.append(text)
-                history_snapshot = list(context_lines)
+                history_snapshot = list(context_lines)[-llm_reasoner.context_lines :]
         else:
             flags = detector.scan(text)
 
@@ -284,37 +337,56 @@ def on_transcript(
                 pipeline_state["ai_queue_depth"] = ai_queue.qsize()
 
 
+def _is_low_confidence_transcript(
+    text: str,
+    is_final: bool,
+    provisional: bool,
+    metadata: dict | None,
+) -> bool:
+    if provisional:
+        return False
+    if not is_final or not metadata:
+        return False
+    avg_logprob = metadata.get("avg_logprob")
+    if not isinstance(avg_logprob, (int, float)):
+        return False
+    if avg_logprob >= config.OPENAI_REALTIME_MIN_AVG_LOGPROB:
+        return False
+    print(f"[transcript:drop] low confidence avg_logprob={avg_logprob:.2f} :: {text}")
+    return True
+
+
 def on_pipeline_status(event: str, detail: str | None):
     with metrics_lock:
         pipeline_state["last_event_at"] = time.time()
 
         if event == "connected":
             pipeline_state["status"] = "running"
-            pipeline_state["deepgram_status"] = "connected"
-            pipeline_state["deepgram_detail"] = None
+            pipeline_state["transcription_status"] = "connected"
+            pipeline_state["transcription_detail"] = None
             return
 
         if event == "connecting":
             pipeline_state["status"] = "starting"
-            pipeline_state["deepgram_status"] = "connecting"
-            pipeline_state["deepgram_detail"] = detail
+            pipeline_state["transcription_status"] = "connecting"
+            pipeline_state["transcription_detail"] = detail
             return
 
         if event == "reconnecting":
             pipeline_state["status"] = "degraded"
-            pipeline_state["deepgram_status"] = "reconnecting"
-            pipeline_state["deepgram_detail"] = detail
+            pipeline_state["transcription_status"] = "reconnecting"
+            pipeline_state["transcription_detail"] = detail
             return
 
         if event == "stopped":
             pipeline_state["status"] = "stopped"
-            pipeline_state["deepgram_status"] = "stopped"
-            pipeline_state["deepgram_detail"] = detail
+            pipeline_state["transcription_status"] = "stopped"
+            pipeline_state["transcription_detail"] = detail
             return
 
         if event == "transcript":
-            pipeline_state["deepgram_status"] = "streaming"
-            pipeline_state["deepgram_detail"] = detail
+            pipeline_state["transcription_status"] = "streaming"
+            pipeline_state["transcription_detail"] = detail
 
 
 def tracked_audio_stream(rate: int, chunk_size: int):
@@ -322,9 +394,11 @@ def tracked_audio_stream(rate: int, chunk_size: int):
         samples = array("h")
         samples.frombytes(chunk)
         peak = max((abs(sample) for sample in samples), default=0)
-        rms = math.sqrt(
-            sum(sample * sample for sample in samples) / len(samples)
-        ) if samples else 0.0
+        rms = (
+            math.sqrt(sum(sample * sample for sample in samples) / len(samples))
+            if samples
+            else 0.0
+        )
         peak_level = (peak / 32767) ** 0.35 if peak else 0.0
         rms_level = (rms / 32767) ** 0.3 if rms else 0.0
         normalized_level = min(100, int(max(peak_level, rms_level) * 100))
@@ -335,7 +409,9 @@ def tracked_audio_stream(rate: int, chunk_size: int):
             if normalized_level >= previous_level:
                 smoothed_level = int((previous_level * 0.4) + (normalized_level * 0.6))
             else:
-                smoothed_level = int((previous_level * 0.82) + (normalized_level * 0.18))
+                smoothed_level = int(
+                    (previous_level * 0.82) + (normalized_level * 0.18)
+                )
             pipeline_state["audio_level"] = max(0, min(100, smoothed_level))
         yield chunk
 
@@ -375,7 +451,10 @@ def _find_term_spans(text: str, term: str) -> list[tuple[int, int]]:
             break
         end_index = index + len(normalized_term)
         left_ok = index == 0 or not normalized_text[index - 1].isalnum()
-        right_ok = end_index >= len(normalized_text) or not normalized_text[end_index].isalnum()
+        right_ok = (
+            end_index >= len(normalized_text)
+            or not normalized_text[end_index].isalnum()
+        )
         if left_ok and right_ok:
             start = text_map[index]
             end = text_map[end_index - 1] + 1
@@ -463,8 +542,8 @@ def pipeline_thread():
     with metrics_lock:
         pipeline_state["status"] = "starting"
         pipeline_state["last_error"] = None
-        pipeline_state["deepgram_status"] = "starting"
-        pipeline_state["deepgram_detail"] = None
+        pipeline_state["transcription_status"] = "starting"
+        pipeline_state["transcription_detail"] = None
         pipeline_state["last_event_at"] = time.time()
         pipeline_state["last_transcript"] = None
         pipeline_state["last_transcript_kind"] = None
@@ -482,15 +561,15 @@ def pipeline_thread():
         mic = tracked_audio_stream(sample_rate, chunk_size)
         with metrics_lock:
             pipeline_state["status"] = "running"
-            pipeline_state["deepgram_status"] = "connecting"
+            pipeline_state["transcription_status"] = "connecting"
         runner(on_transcript, mic, on_pipeline_status)
     except Exception as exc:
         error = f"{exc.__class__.__name__}: {exc}"
         with metrics_lock:
             pipeline_state["status"] = "error"
             pipeline_state["last_error"] = error
-            pipeline_state["deepgram_status"] = "error"
-            pipeline_state["deepgram_detail"] = error
+            pipeline_state["transcription_status"] = "error"
+            pipeline_state["transcription_detail"] = error
         print(f"[pipeline:error] {error}")
         print(traceback.format_exc().rstrip())
 
@@ -503,10 +582,7 @@ async def lifespan(app: FastAPI):
     ai_worker_task = asyncio.create_task(ai_worker())
     _apply_preset("cafe")
     if llm_reasoner.enabled:
-        print(
-            "AI detector enabled "
-            f"(openai: {llm_reasoner.model})"
-        )
+        print(f"AI detector enabled (openai: {llm_reasoner.model})")
     else:
         print(
             "AI detector disabled "

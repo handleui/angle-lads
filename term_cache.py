@@ -6,7 +6,7 @@ import unicodedata
 from pathlib import Path
 
 _DB_PATH = Path(__file__).parent / ".angle-lads-cache.sqlite3"
-_CACHE_VERSION = 2
+_CACHE_VERSION = 4
 _WORD_RE = re.compile(r"[0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ][0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ'_-]*")
 
 
@@ -26,14 +26,34 @@ class TermCache:
         normalized_text = _normalize(text)
         if not normalized_text:
             return None
+        candidates = _candidate_terms(normalized_text)
+        if not candidates:
+            return None
+        placeholders = ", ".join("?" for _ in candidates)
+        params = [
+            *candidates,
+            _CACHE_VERSION,
+        ]
 
         with self._lock, sqlite3.connect(self.path) as conn:
             rows = conn.execute(
-                """
-                SELECT term, term_normalized, definition, why_in_context, target_generation, confidence, source, version
+                f"""
+                SELECT
+                    term,
+                    term_normalized,
+                    definition,
+                    why_in_context,
+                    target_generation,
+                    confidence,
+                    source,
+                    version
                 FROM term_cache
+                WHERE term_normalized IN ({placeholders})
+                  AND version = ?
+                  AND source = 'dictionary'
                 ORDER BY LENGTH(term_normalized) DESC, updated_at DESC
-                """
+                """,
+                params,
             ).fetchall()
 
         for row in rows:
@@ -47,16 +67,7 @@ class TermCache:
                 source,
                 version,
             ) = row
-            if not term_normalized:
-                continue
-            if version != _CACHE_VERSION:
-                continue
-            if not is_cacheable_term(term):
-                continue
-            if source == "ai" and (float(confidence) < 0.9 or target_generation == "unknown"):
-                continue
-            pattern = rf"(?<!\w){re.escape(term_normalized)}(?!\w)"
-            if not re.search(pattern, normalized_text):
+            if not term_normalized or not is_cacheable_term(term):
                 continue
             return {
                 "term": term,
@@ -71,7 +82,9 @@ class TermCache:
     def store(self, explanation: dict):
         term = str(explanation.get("term", "")).strip()
         source = str(explanation.get("source", "ai")).strip() or "ai"
-        if not term or (source == "ai" and not is_cacheable_term(term)):
+        if source != "dictionary":
+            return
+        if not term or not is_cacheable_term(term):
             return
 
         with self._lock, sqlite3.connect(self.path) as conn:
@@ -135,9 +148,15 @@ class TermCache:
                 for row in conn.execute("PRAGMA table_info(term_cache)").fetchall()
             }
             if "source" not in columns:
-                conn.execute("ALTER TABLE term_cache ADD COLUMN source TEXT NOT NULL DEFAULT 'ai'")
+                conn.execute(
+                    "ALTER TABLE term_cache "
+                    "ADD COLUMN source TEXT NOT NULL DEFAULT 'ai'"
+                )
             if "version" not in columns:
-                conn.execute("ALTER TABLE term_cache ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+                conn.execute(
+                    "ALTER TABLE term_cache "
+                    "ADD COLUMN version INTEGER NOT NULL DEFAULT 1"
+                )
             conn.commit()
 
 
@@ -151,3 +170,21 @@ def is_cacheable_term(term: str) -> bool:
     if len(words) == 1 and len(words[0]) < 5:
         return False
     return True
+
+
+def _candidate_terms(normalized_text: str) -> list[str]:
+    words = [match.group(0) for match in _WORD_RE.finditer(normalized_text)]
+    if not words:
+        return []
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    max_words = min(3, len(words))
+    for size in range(max_words, 0, -1):
+        for start in range(len(words) - size + 1):
+            candidate = " ".join(words[start : start + size])
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            candidates.append(candidate)
+    return candidates

@@ -7,6 +7,7 @@ import random
 from websockets.asyncio.client import connect
 
 import config
+import detector
 
 _REALTIME_URL = "wss://api.openai.com/v1/realtime"
 _RECONNECT_BASE_SECONDS = 0.25
@@ -24,19 +25,19 @@ _PRESETS = {
         "vad_threshold": 0.7,
         "prefix_padding_ms": 140,
         "silence_ms": 260,
-        "optimistic_final_ms": 340,
+        "optimistic_final_ms": 0,
     },
     "privado": {
         "vad_mode": "server_vad",
         "vad_threshold": 0.58,
         "prefix_padding_ms": 200,
         "silence_ms": 340,
-        "optimistic_final_ms": 430,
+        "optimistic_final_ms": 0,
     },
     "focus": {
         "vad_mode": "semantic_vad",
         "vad_eagerness": "high",
-        "optimistic_final_ms": 380,
+        "optimistic_final_ms": 0,
     },
 }
 
@@ -84,11 +85,16 @@ async def _run_forever(on_transcript, audio_chunks, on_status):
             return
         except Exception as exc:
             now = asyncio.get_running_loop().time()
-            if not last_failure_at or (now - last_failure_at) > _FAILURE_STREAK_RESET_SECONDS:
+            if (
+                not last_failure_at
+                or (now - last_failure_at) > _FAILURE_STREAK_RESET_SECONDS
+            ):
                 attempts = 0
             attempts += 1
             last_failure_at = now
-            backoff = min(_RECONNECT_MAX_SECONDS, _RECONNECT_BASE_SECONDS * (2 ** (attempts - 1)))
+            backoff = min(
+                _RECONNECT_MAX_SECONDS, _RECONNECT_BASE_SECONDS * (2 ** (attempts - 1))
+            )
             delay = backoff + random.uniform(0.0, 0.25)
             _emit_status(
                 on_status,
@@ -107,14 +113,16 @@ async def _run(on_transcript, audio_iter, on_status):
     partials: dict[str, str] = {}
     ordered_items: list[str] = []
     waiting_children: dict[str | None, list[str]] = {}
-    completed_items: dict[str, str] = {}
+    completed_items: dict[str, dict] = {}
     emitted_items: set[str] = set()
     optimistic_tasks: dict[str, asyncio.Task] = {}
     latest_partial = {"item_id": None}
 
     async with connect(url, additional_headers=headers, max_size=2**24) as ws:
         _emit_status(on_status, "connecting", None)
-        await ws.send(json.dumps({"type": "session.update", "session": _session_config()}))
+        await ws.send(
+            json.dumps({"type": "session.update", "session": _session_config()})
+        )
         await _await_session_ready(ws)
         _emit_status(on_status, "connected", None)
 
@@ -172,7 +180,9 @@ async def _receive_loop(
 
         if event_type == "error":
             error = message.get("error", {})
-            detail = error.get("message") or error.get("code") or "OpenAI realtime error"
+            detail = (
+                error.get("message") or error.get("code") or "OpenAI realtime error"
+            )
             _emit_status(on_status, "reconnecting", str(detail))
             continue
 
@@ -180,17 +190,33 @@ async def _receive_loop(
             item_id = message.get("item_id")
             previous_item_id = message.get("previous_item_id")
             if item_id:
-                _insert_ordered_item(item_id, previous_item_id, ordered_items, waiting_children)
-                _flush_completed(ordered_items, completed_items, emitted_items, on_transcript, on_status)
+                _insert_ordered_item(
+                    item_id, previous_item_id, ordered_items, waiting_children
+                )
+                _flush_completed(
+                    ordered_items,
+                    completed_items,
+                    emitted_items,
+                    on_transcript,
+                    on_status,
+                )
             continue
 
         if event_type.endswith("input_audio_transcription.delta"):
             item_id = message.get("item_id") or "default"
-            partials[item_id] = partials.get(item_id, "") + str(message.get("delta", ""))
+            partials[item_id] = partials.get(item_id, "") + str(
+                message.get("delta", "")
+            )
             _cancel_optimistic(optimistic_tasks, item_id)
             latest_partial["item_id"] = item_id
             _emit_status(on_status, "transcript", "interim")
-            on_transcript(partials[item_id].strip(), False, False, item_id)
+            on_transcript(
+                partials[item_id].strip(),
+                False,
+                False,
+                item_id,
+                {"origin": "delta"},
+            )
             continue
 
         if event_type.endswith("input_audio_transcription.completed"):
@@ -203,8 +229,17 @@ async def _receive_loop(
             )
             text = str(text).strip()
             if text:
-                completed_items[item_id] = text
-                _flush_completed(ordered_items, completed_items, emitted_items, on_transcript, on_status)
+                completed_items[item_id] = {
+                    "text": text,
+                    "avg_logprob": _average_logprob(message.get("logprobs")),
+                }
+                _flush_completed(
+                    ordered_items,
+                    completed_items,
+                    emitted_items,
+                    on_transcript,
+                    on_status,
+                )
             continue
 
         if event_type == "input_audio_buffer.speech_started":
@@ -214,7 +249,7 @@ async def _receive_loop(
         if event_type == "input_audio_buffer.speech_stopped":
             _emit_status(on_status, "streaming", "speech_stopped")
             item_id = latest_partial.get("item_id")
-            if item_id and partials.get(item_id):
+            if _CURRENT_OPTIMISTIC_FINAL_MS > 0 and item_id and partials.get(item_id):
                 optimistic_tasks[item_id] = asyncio.create_task(
                     _emit_optimistic_final(
                         item_id,
@@ -228,13 +263,20 @@ async def _receive_loop(
 
 def _session_config():
     session = {
-        "input_audio_format": "pcm16",
-        "input_audio_noise_reduction": {"type": "near_field"},
-        "input_audio_transcription": {
-            "model": config.OPENAI_REALTIME_MODEL,
-            "language": config.OPENAI_REALTIME_LANGUAGE,
+        "type": "transcription",
+        "audio": {
+            "input": {
+                "format": {"type": "audio/pcm", "rate": config.OPENAI_AUDIO_RATE},
+                "noise_reduction": {"type": "near_field"},
+                "transcription": {
+                    "model": config.OPENAI_REALTIME_MODEL,
+                    "language": config.OPENAI_REALTIME_LANGUAGE,
+                    "prompt": _transcription_prompt(),
+                },
+                "turn_detection": _turn_detection_config(),
+            }
         },
-        "turn_detection": _turn_detection_config(),
+        "include": ["item.input_audio_transcription.logprobs"],
     }
     return session
 
@@ -258,7 +300,7 @@ def _turn_detection_config():
 async def _emit_optimistic_final(
     item_id: str,
     partials: dict[str, str],
-    completed_items: dict[str, str],
+    completed_items: dict[str, dict],
     emitted_items: set[str],
     on_transcript,
 ):
@@ -267,7 +309,7 @@ async def _emit_optimistic_final(
         return
     text = partials.get(item_id, "").strip()
     if text:
-        on_transcript(text, True, True, item_id)
+        on_transcript(text, True, True, item_id, {"origin": "optimistic"})
 
 
 def _cancel_optimistic(optimistic_tasks: dict[str, asyncio.Task], item_id: str):
@@ -292,16 +334,27 @@ def _insert_ordered_item(item_id, previous_item_id, ordered_items, waiting_child
         _insert_ordered_item(child_id, item_id, ordered_items, waiting_children)
 
 
-def _flush_completed(ordered_items, completed_items, emitted_items, on_transcript, on_status):
+def _flush_completed(
+    ordered_items, completed_items, emitted_items, on_transcript, on_status
+):
     for item_id in ordered_items:
         if item_id in emitted_items:
             continue
-        text = completed_items.get(item_id)
-        if not text:
+        payload = completed_items.get(item_id)
+        if not payload:
             break
         emitted_items.add(item_id)
         _emit_status(on_status, "transcript", "final")
-        on_transcript(text, True, False, item_id)
+        on_transcript(
+            payload["text"],
+            True,
+            False,
+            item_id,
+            {
+                "origin": "completed",
+                "avg_logprob": payload["avg_logprob"],
+            },
+        )
 
 
 async def _await_session_ready(ws):
@@ -314,7 +367,9 @@ async def _await_session_ready(ws):
             continue
         if event_type == "error":
             error = message.get("error", {})
-            detail = error.get("message") or error.get("code") or "OpenAI realtime error"
+            detail = (
+                error.get("message") or error.get("code") or "OpenAI realtime error"
+            )
             raise RuntimeError(str(detail))
 
 
@@ -322,3 +377,33 @@ def _emit_status(on_status, event: str, detail: str | None):
     if on_status is None:
         return
     on_status(event, detail)
+
+
+def _average_logprob(logprobs) -> float | None:
+    if not isinstance(logprobs, list) or not logprobs:
+        return None
+    values = [
+        float(item["logprob"])
+        for item in logprobs
+        if isinstance(item, dict) and isinstance(item.get("logprob"), (int, float))
+    ]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _transcription_prompt() -> str:
+    custom_prompt = config.OPENAI_REALTIME_TRANSCRIPTION_PROMPT.strip()
+    hints = detector.transcription_prompt(config.OPENAI_REALTIME_HINT_TERMS)
+    parts = [
+        "Transcribe audio exactly as spoken.",
+        "Do not translate or switch languages.",
+        "Prefer Mexican Spanish and common Spanglish spellings.",
+        "If audio is unclear, keep the transcript conservative instead of "
+        "inventing words.",
+    ]
+    if custom_prompt:
+        parts.append(custom_prompt)
+    if hints:
+        parts.append(f"Keyword hints: {hints}")
+    return " ".join(parts)
