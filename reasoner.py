@@ -6,6 +6,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from email.utils import parsedate_to_datetime
 
 import config
 
@@ -49,16 +50,23 @@ class ContextReasoner:
         self.timeout_seconds = config.GEMINI_TIMEOUT_SECONDS
         self.min_confidence = config.GEMINI_CONFIDENCE_THRESHOLD
         self.cooldown_seconds = config.GEMINI_TERM_COOLDOWN_SECONDS
+        self.min_request_seconds = max(0.0, config.GEMINI_MIN_REQUEST_SECONDS)
         self.max_retries = max(0, config.GEMINI_MAX_RETRIES)
         self.retry_base_seconds = max(0.05, config.GEMINI_RETRY_BASE_SECONDS)
         self.enabled = bool(self.api_key)
         self._last_fired_at: dict[str, float] = {}
         self._cooldown_lock = threading.Lock()
+        self._request_lock = threading.Lock()
+        self._last_request_started_at = 0.0
+        self.last_error: str | None = None
 
     def explain(self, latest_line: str, history: list[str]) -> dict | None:
         if not self.enabled:
             return None
 
+        self.last_error = None
+        if not self._wait_for_request_slot():
+            return None
         text = self._generate_json(latest_line, history)
         if text is None:
             return None
@@ -88,6 +96,16 @@ class ContextReasoner:
             "confidence": confidence,
             "model": self.model,
         }
+
+    def _wait_for_request_slot(self) -> bool:
+        with self._request_lock:
+            now = time.monotonic()
+            wait_seconds = self.min_request_seconds - (now - self._last_request_started_at)
+            if wait_seconds > 0:
+                self.last_error = f"IA en enfriamiento ({wait_seconds:.1f}s)"
+                return False
+            self._last_request_started_at = now
+            return True
 
     def _passes_cooldown(self, term: str) -> bool:
         now = time.monotonic()
@@ -148,15 +166,21 @@ class ContextReasoner:
             return None
 
         if decoded.get("promptFeedback", {}).get("blockReason"):
+            self.last_error = (
+                "Gemini bloqueado: "
+                f"{decoded.get('promptFeedback', {}).get('blockReason')}"
+            )
             return None
 
         candidates = decoded.get("candidates", [])
         if not candidates:
+            self.last_error = "Gemini sin candidates"
             return None
 
         first_candidate = candidates[0]
         finish_reason = str(first_candidate.get("finishReason", "")).upper()
         if finish_reason in _BLOCKING_FINISH_REASONS:
+            self.last_error = f"Gemini finishReason={finish_reason}"
             return None
 
         parts = first_candidate.get("content", {}).get("parts", [])
@@ -170,14 +194,29 @@ class ContextReasoner:
             )
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout_seconds) as res:
+                    self.last_error = None
                     return json.loads(res.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
+                retry_after = _retry_after_seconds(exc)
+                if retry_after is not None:
+                    with self._request_lock:
+                        self._last_request_started_at = time.monotonic() + retry_after
+                self.last_error = f"Gemini HTTP {exc.code}"
                 if (
                     exc.code not in _RETRYABLE_STATUS_CODES
                     or attempt >= self.max_retries
                 ):
                     return None
-            except (TimeoutError, urllib.error.URLError, json.JSONDecodeError):
+            except TimeoutError:
+                self.last_error = "Gemini timeout"
+                if attempt >= self.max_retries:
+                    return None
+            except urllib.error.URLError as exc:
+                self.last_error = f"Gemini URL error: {exc.reason}"
+                if attempt >= self.max_retries:
+                    return None
+            except json.JSONDecodeError:
+                self.last_error = "Gemini JSON invalido"
                 if attempt >= self.max_retries:
                     return None
 
@@ -217,3 +256,18 @@ def _to_float(value) -> float:
 def _normalize_term(term: str) -> str:
     compact = _TERM_RE.sub(" ", term.strip().lower())
     return compact
+
+
+def _retry_after_seconds(exc: urllib.error.HTTPError) -> float | None:
+    value = exc.headers.get("Retry-After")
+    if not value:
+        return None
+
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (TypeError, ValueError, IndexError):
+            return None
+        return max(0.0, retry_at.timestamp() - time.time())

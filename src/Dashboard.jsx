@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 const WS_URL = "ws://localhost:8000/ws";
 const METRICS_URL = "http://localhost:8000/metrics";
 const RECONNECT_DELAY_MS = 1000;
-const METRICS_POLL_MS = 2000;
+const METRICS_POLL_MS = 120;
 const COLORS = {
   text: "#0f172a",
   muted: "#64748b",
@@ -56,14 +56,20 @@ function renderTiming(timingMs) {
   return `llm ${llm}ms · e2e ${e2e}ms`;
 }
 
-function renderStatusDetail(connected, connectionError, pipelineState) {
-  if (!connected) return connectionError || "conectando";
-  if (!pipelineState) return "cargando";
-  return [
-    pipelineState.status,
-    `audio ${pipelineState.audio_chunks_sent}`,
-    `queue ${pipelineState.ai_queue_depth}`,
-  ].join(" · ");
+function getStatusColor(connected, pipelineError) {
+  if (!connected || pipelineError) return "#dc2626";
+  return "#16a34a";
+}
+
+function renderAudioBars(level) {
+  return [0, 1, 2, 3, 4].map((index) => {
+    const active = level >= (index + 1) * 20;
+    return (
+      <span key={index} style={audioBarTrack}>
+        <span style={audioBarFill(active)} />
+      </span>
+    );
+  });
 }
 
 export function Dashboard() {
@@ -75,6 +81,8 @@ export function Dashboard() {
   const [connectionError, setConnectionError] = useState("");
   const [pipelineError, setPipelineError] = useState("");
   const [pipelineState, setPipelineState] = useState(null);
+  const [audioLevel, setAudioLevel] = useState(0);
+  const [displayAudioLevel, setDisplayAudioLevel] = useState(0);
   const endRef = useRef(null);
   const nextId = useRef(0);
 
@@ -142,10 +150,12 @@ export function Dashboard() {
         const error = data.pipeline?.last_error;
         setPipelineError(typeof error === "string" ? error : "");
         setPipelineState(data.pipeline ?? null);
+        setAudioLevel(data.pipeline?.audio_level ?? 0);
       } catch {
         if (cancelled) return;
         setPipelineError("");
         setPipelineState(null);
+        setAudioLevel(0);
       }
     };
 
@@ -157,6 +167,21 @@ export function Dashboard() {
       window.clearInterval(interval);
     };
   }, []);
+
+  useEffect(() => {
+    let frameId;
+
+    const animate = () => {
+      setDisplayAudioLevel((prev) => {
+        const next = prev + (audioLevel - prev) * 0.2;
+        return Math.abs(next - audioLevel) < 0.5 ? audioLevel : next;
+      });
+      frameId = window.requestAnimationFrame(animate);
+    };
+
+    frameId = window.requestAnimationFrame(animate);
+    return () => window.cancelAnimationFrame(frameId);
+  }, [audioLevel]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: scroll on every state change
   useEffect(() => {
@@ -172,22 +197,27 @@ export function Dashboard() {
     <div style={root}>
       <header style={head}>
         <div style={headLeft}>
-          <span style={dot(connected)} />
+          <span style={dot(getStatusColor(connected, pipelineError))} />
           <span style={timestamp}>{time}</span>
         </div>
-        <p style={statusRail}>{renderStatusDetail(connected, connectionError, pipelineState)}</p>
+        <div style={statusRail}>
+          <div
+            role="img"
+            style={audioMeter}
+            aria-label={`nivel de audio ${Math.round(displayAudioLevel)}`}
+          >
+            {renderAudioBars(displayAudioLevel)}
+          </div>
+          {!connected && <p style={statusText}>{connectionError}</p>}
+        </div>
       </header>
       {pipelineError && <p style={errorText}>error del pipeline · {pipelineError}</p>}
-      {pipelineState?.deepgram_detail && (
-        <p style={metaLine}>deepgram · {pipelineState.deepgram_detail}</p>
-      )}
-      {pipelineState?.last_transcript && (
-        <p style={metaLine}>
-          ultima {pipelineState.last_transcript_kind} · {pipelineState.last_transcript}
-        </p>
-      )}
       <section style={contextCard}>
-        <p style={panelTitle}>Contexto</p>
+        <div style={contextHead}>
+          <p style={panelTitle}>Contexto</p>
+          <p style={queueText}>cola {pipelineState?.ai_queue_depth ?? 0}</p>
+        </div>
+        {pipelineState?.ai_error && <p style={cardMeta}>IA · {pipelineState.ai_error}</p>}
         {explanations.length === 0 && (
           <p style={empty}>Esperando terminos que puedan causar confusion generacional...</p>
         )}
@@ -239,11 +269,11 @@ const headLeft = {
   gap: 8,
 };
 
-const dot = (on) => ({
+const dot = (color) => ({
   width: 6,
   height: 6,
   borderRadius: "50%",
-  backgroundColor: on ? COLORS.text : COLORS.border,
+  backgroundColor: color,
   transition: "background-color 0.2s",
 });
 
@@ -255,6 +285,12 @@ const timestamp = {
 };
 
 const statusRail = {
+  display: "flex",
+  alignItems: "center",
+  gap: 12,
+};
+
+const statusText = {
   margin: 0,
   fontSize: 13,
   color: COLORS.muted,
@@ -262,17 +298,32 @@ const statusRail = {
   textAlign: "right",
 };
 
+const audioMeter = {
+  display: "flex",
+  alignItems: "flex-end",
+  gap: 3,
+};
+
+const audioBarTrack = {
+  display: "block",
+  width: 3,
+  height: 16,
+  backgroundColor: "#cbd5e1",
+  overflow: "hidden",
+};
+
+const audioBarFill = (active) => ({
+  display: "block",
+  width: 3,
+  height: 16,
+  backgroundColor: active ? COLORS.text : "transparent",
+  transition: "background-color 90ms linear",
+});
+
 const errorText = {
   margin: "0 0 8px 0",
   fontSize: 13,
   color: COLORS.error,
-  letterSpacing: TRACKING,
-};
-
-const metaLine = {
-  margin: "0 0 8px 0",
-  fontSize: 13,
-  color: COLORS.muted,
   letterSpacing: TRACKING,
 };
 
@@ -282,6 +333,13 @@ const contextCard = {
   padding: "14px 16px",
   border: `1px solid ${COLORS.border}`,
   borderRadius: 10,
+};
+
+const contextHead = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 12,
 };
 
 const transcript = {
@@ -305,6 +363,20 @@ const panelTitle = {
   margin: 0,
   fontSize: 13,
   color: COLORS.text,
+  letterSpacing: TRACKING,
+};
+
+const queueText = {
+  margin: 0,
+  fontSize: 13,
+  color: COLORS.muted,
+  letterSpacing: TRACKING,
+};
+
+const cardMeta = {
+  margin: "10px 0 0 0",
+  fontSize: 13,
+  color: COLORS.muted,
   letterSpacing: TRACKING,
 };
 

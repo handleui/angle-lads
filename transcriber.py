@@ -70,6 +70,9 @@ def _stream_session(client, on_transcript, audio_chunks, on_status):
         interim_results="true",
         smart_format="true",
         punctuate="true",
+        vad_events="true",
+        utterance_end_ms="1000",
+        endpointing="300",
     ) as conn:
         _emit_status(on_status, "connected", None)
 

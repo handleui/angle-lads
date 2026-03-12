@@ -6,7 +6,7 @@ FORMAT = pyaudio.paInt16
 CHUNK = 4096
 
 
-def stream():
+def stream(rate: int = RATE, chunk: int = CHUNK):
     """Open microphone and yield raw audio chunks.
 
     Yields bytes until KeyboardInterrupt.
@@ -15,13 +15,13 @@ def stream():
     mic = p.open(
         format=FORMAT,
         channels=CHANNELS,
-        rate=RATE,
+        rate=rate,
         input=True,
-        frames_per_buffer=CHUNK,
+        frames_per_buffer=chunk,
     )
     try:
         while True:
-            yield mic.read(CHUNK, exception_on_overflow=False)
+            yield mic.read(chunk, exception_on_overflow=False)
     except KeyboardInterrupt:
         pass
     finally:
