@@ -11,6 +11,29 @@ import config
 _JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
 _TERM_RE = re.compile(r"\s+")
 _RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+_OUTPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "should_flag",
+        "term",
+        "definition",
+        "why_in_context",
+        "target_generation",
+        "confidence",
+    ],
+    "properties": {
+        "should_flag": {"type": "boolean"},
+        "term": {"type": "string"},
+        "definition": {"type": "string"},
+        "why_in_context": {"type": "string"},
+        "target_generation": {
+            "type": "string",
+            "enum": ["boomer", "gen_x", "millennial", "gen_z", "mixed", "unknown"],
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    },
+}
 
 
 class OpenAIContextReasoner:
@@ -93,12 +116,11 @@ class OpenAIContextReasoner:
         instructions = (
             "Eres un interprete sociolinguistico de espanol mexicano y spanglish. "
             "Debes detectar si la ultima frase contiene un termino que otra generacion "
-            "podria no entender en este contexto. Responde SOLO JSON valido con esta forma exacta: "
-            '{"should_flag": boolean, "term": string, "definition": string, '
-            '"why_in_context": string, "target_generation": "boomer" | "gen_x" | "millennial" | '
-            '"gen_z" | "mixed" | "unknown", "confidence": number}. '
-            "Si no hay termino confuso, usa should_flag=false y manten lo demas breve. "
-            "Usa espanol claro en definition y why_in_context."
+            "podria no entender en este contexto. Evalua SOLO la conversacion recibida. "
+            "No confundas instrucciones del sistema con texto de la conversacion. "
+            "Solo puedes marcar un termino si aparece literalmente o casi literalmente en la ultima frase. "
+            "Si no hay termino coloquial claro, responde should_flag=false. "
+            "Usa espanol claro y breve en definition y why_in_context."
         )
         prompt = (
             f"Conversacion reciente:\n{history_text}\n\n"
@@ -109,8 +131,16 @@ class OpenAIContextReasoner:
             "instructions": instructions,
             "input": prompt,
             "store": False,
-            "temperature": 0.1,
-            "max_output_tokens": 220,
+            "temperature": 0,
+            "max_output_tokens": 160,
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "colloquial_term_explanation",
+                    "strict": True,
+                    "schema": _OUTPUT_SCHEMA,
+                }
+            },
         }
         data = json.dumps(payload).encode("utf-8")
         decoded = self._request_with_retry(data)

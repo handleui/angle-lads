@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+it proeceese#!/usr/bin/env bash
 set -e
 
 DIR="$(cd "$(dirname "$0")" && pwd)"

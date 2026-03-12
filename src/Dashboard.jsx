@@ -83,6 +83,7 @@ export function Dashboard() {
   const [pipelineState, setPipelineState] = useState(null);
   const [audioLevel, setAudioLevel] = useState(0);
   const [displayAudioLevel, setDisplayAudioLevel] = useState(0);
+  const [activeExplanationIndex, setActiveExplanationIndex] = useState(0);
   const endRef = useRef(null);
   const nextId = useRef(0);
 
@@ -111,7 +112,11 @@ export function Dashboard() {
           setInterim(msg.text);
         } else if (msg.type === "explanation") {
           const id = nextId.current++;
-          setExplanations((prev) => [...prev, { id, ...msg }].slice(-40));
+          setExplanations((prev) => {
+            const next = [...prev, { id, ...msg }].slice(-40);
+            setActiveExplanationIndex(next.length - 1);
+            return next;
+          });
         }
       };
 
@@ -192,6 +197,7 @@ export function Dashboard() {
     hour: "2-digit",
     minute: "2-digit",
   });
+  const activeExplanation = explanations[activeExplanationIndex] ?? null;
 
   return (
     <div style={root}>
@@ -215,26 +221,44 @@ export function Dashboard() {
       <section style={contextCard}>
         <div style={contextHead}>
           <p style={panelTitle}>Contexto</p>
-          <p style={queueText}>cola {pipelineState?.ai_queue_depth ?? 0}</p>
+          <div style={contextNav}>
+            <button
+              type="button"
+              style={navButton}
+              onClick={() => setActiveExplanationIndex((prev) => Math.max(0, prev - 1))}
+              disabled={activeExplanationIndex === 0}
+            >
+              ←
+            </button>
+            <button
+              type="button"
+              style={navButton}
+              onClick={() =>
+                setActiveExplanationIndex((prev) => Math.min(explanations.length - 1, prev + 1))
+              }
+              disabled={activeExplanationIndex >= explanations.length - 1}
+            >
+              →
+            </button>
+          </div>
         </div>
         {pipelineState?.ai_error && <p style={cardMeta}>IA · {pipelineState.ai_error}</p>}
-        {explanations.length === 0 && (
+        {!activeExplanation && (
           <p style={empty}>Esperando terminos que puedan causar confusion generacional...</p>
         )}
-        {explanations
-          .slice()
-          .reverse()
-          .map((item) => (
-            <article key={item.id} style={entry}>
-              <p style={entryMeta}>
-                {item.term} · {item.target_generation} · {(item.confidence * 100).toFixed(0)}%
-              </p>
-              <p style={lineStyle}>{item.text}</p>
-              <p style={definition}>{item.definition}</p>
-              <p style={why}>{item.why_in_context}</p>
-              {renderTiming(item.timing_ms) && <p style={timing}>{renderTiming(item.timing_ms)}</p>}
-            </article>
-          ))}
+        {activeExplanation && (
+          <article key={activeExplanation.id} style={entry}>
+            <p style={entryMeta}>
+              {activeExplanation.term} · {activeExplanation.target_generation} ·{" "}
+              {(activeExplanation.confidence * 100).toFixed(0)}%
+            </p>
+            <p style={definition}>{activeExplanation.definition}</p>
+            <p style={why}>{activeExplanation.why_in_context}</p>
+            {renderTiming(activeExplanation.timing_ms) && (
+              <p style={timing}>{renderTiming(activeExplanation.timing_ms)}</p>
+            )}
+          </article>
+        )}
       </section>
       <div style={transcript}>
         {lines.map((line) => (
@@ -328,11 +352,15 @@ const errorText = {
 };
 
 const contextCard = {
+  position: "sticky",
+  top: 18,
+  zIndex: 10,
   marginTop: 16,
   marginBottom: 24,
   padding: "14px 16px",
   border: `1px solid ${COLORS.border}`,
   borderRadius: 10,
+  backgroundColor: "rgba(255, 255, 255, 0.96)",
 };
 
 const contextHead = {
@@ -340,6 +368,12 @@ const contextHead = {
   alignItems: "center",
   justifyContent: "space-between",
   gap: 12,
+};
+
+const contextNav = {
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
 };
 
 const transcript = {
@@ -366,11 +400,17 @@ const panelTitle = {
   letterSpacing: TRACKING,
 };
 
-const queueText = {
-  margin: 0,
+const navButton = {
+  width: 24,
+  height: 24,
+  border: `1px solid ${COLORS.border}`,
+  borderRadius: 999,
+  background: "transparent",
+  color: COLORS.text,
   fontSize: 13,
-  color: COLORS.muted,
-  letterSpacing: TRACKING,
+  lineHeight: "24px",
+  padding: 0,
+  cursor: "pointer",
 };
 
 const cardMeta = {
@@ -388,18 +428,11 @@ const empty = {
 };
 
 const entry = {
-  paddingTop: 14,
+  paddingTop: 12,
 };
 
 const entryMeta = {
   margin: 0,
-  fontSize: 13,
-  color: COLORS.muted,
-  letterSpacing: TRACKING,
-};
-
-const lineStyle = {
-  margin: "6px 0 0 0",
   fontSize: 13,
   color: COLORS.muted,
   letterSpacing: TRACKING,
