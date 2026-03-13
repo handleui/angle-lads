@@ -135,6 +135,16 @@ ENGLISH_STOPWORDS = {
     "tonight",
     "okay",
 }
+_TRANSCRIPTION_INJECTION_MARKERS = (
+    "transcribe audio exactly as spoken",
+    "do not translate or switch languages",
+    "prefer mexican spanish and common spanglish spellings",
+    "multiple speakers may appear",
+    "do not wait for perfect full sentences",
+    "keep the transcript conservative instead of inventing words",
+    "keyword hints:",
+    "expected terms:",
+)
 
 
 class PresetPayload(BaseModel):
@@ -368,6 +378,8 @@ def _drop_reason_for_transcript(
         return "disallowed_script"
     if _looks_like_dictionary_dump(text):
         return "dictionary_dump"
+    if _looks_like_transcription_instruction_leak(text):
+        return "instruction_leak"
     if _looks_unsupported_language(text):
         return "unsupported_language"
     return None
@@ -397,6 +409,9 @@ def _is_low_confidence_transcript(
 
 
 def on_pipeline_status(event: str, detail: str | None):
+    if event in {"connecting", "connected", "reconnecting", "stopped"}:
+        suffix = f" ({detail})" if detail else ""
+        print(f"[transcriber:{event}]{suffix}")
     with metrics_lock:
         pipeline_state["last_event_at"] = time.time()
 
@@ -575,6 +590,25 @@ def _looks_unsupported_language(text: str) -> bool:
         if token in SPANISH_STOPWORDS or token in ENGLISH_STOPWORDS
     )
     return support == 0
+
+
+def _looks_like_transcription_instruction_leak(text: str) -> bool:
+    normalized = " ".join(text.lower().split())
+    if len(normalized) < 40:
+        return False
+    matches = sum(
+        1 for marker in _TRANSCRIPTION_INJECTION_MARKERS if marker in normalized
+    )
+    if matches >= 2:
+        return True
+    if "keyword hints:" in normalized or "expected terms:" in normalized:
+        return True
+    if (
+        "transcribe audio exactly as spoken" in normalized
+        and "do not translate" in normalized
+    ):
+        return True
+    return False
 
 
 def pipeline_thread():

@@ -16,19 +16,19 @@ _RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 _DICTIONARY_WHY = "Se usa aqui como termino coloquial dentro de la conversacion."
 _PRESETS = {
     "cafe": {
-        "min_confidence": 0.74,
+        "min_confidence": 0.8,
         "cooldown_seconds": 50,
         "min_request_seconds": 2.4,
         "context_lines": 3,
     },
     "privado": {
-        "min_confidence": 0.78,
+        "min_confidence": 0.83,
         "cooldown_seconds": 36,
         "min_request_seconds": 1.5,
         "context_lines": 5,
     },
     "focus": {
-        "min_confidence": 0.72,
+        "min_confidence": 0.77,
         "cooldown_seconds": 30,
         "min_request_seconds": 1.2,
         "context_lines": 6,
@@ -143,7 +143,10 @@ class OpenAIContextReasoner:
     def set_preset(self, preset: str):
         selected = _PRESETS.get(preset, _PRESETS["cafe"])
         self.preset = preset if preset in _PRESETS else "cafe"
-        self.min_confidence = selected["min_confidence"]
+        self.min_confidence = max(
+            config.OPENAI_EXPLANATION_CONFIDENCE_THRESHOLD,
+            selected["min_confidence"],
+        )
         self.cooldown_seconds = selected["cooldown_seconds"]
         self.min_request_seconds = selected["min_request_seconds"]
         self.context_lines = selected["context_lines"]
@@ -173,12 +176,12 @@ class OpenAIContextReasoner:
                 latest_line,
                 history,
             )
-            if explanations:
-                return explanations
-            return [
-                self._build_dictionary_explanation(match, _DICTIONARY_WHY)
-                for match in dictionary_matches
-            ]
+            if explanations is None:
+                return [
+                    self._build_dictionary_explanation(match, _DICTIONARY_WHY)
+                    for match in dictionary_matches
+                ]
+            return explanations
 
         if not self._wait_for_request_slot():
             return []
@@ -218,6 +221,8 @@ class OpenAIContextReasoner:
         if dictionary_entry is not None:
             explanation = self._build_dictionary_explanation(dictionary_entry, why)
         else:
+            if not self._passes_span_sanity(term, term_kind):
+                return []
             explanation = {
                 "term": term,
                 "definition": definition,
@@ -267,7 +272,7 @@ class OpenAIContextReasoner:
             selected.append(match)
             seen_terms.add(term)
             last_end = match["end"]
-        return selected[:3]
+        return selected[:2]
 
     def _build_dictionary_explanation(self, match: dict, why: str) -> dict:
         return {
@@ -285,16 +290,16 @@ class OpenAIContextReasoner:
         matches: list[dict],
         latest_line: str,
         history: list[str],
-    ) -> list[dict]:
+    ) -> list[dict] | None:
         text = self._generate_known_terms_json(matches, latest_line, history)
         if text is None:
-            return []
+            return None
         parsed = self._parse_json(text)
         if parsed is None:
-            return []
+            return None
         items = parsed.get("items")
         if not isinstance(items, list):
-            return []
+            return None
 
         by_term = {}
         for item in items:
@@ -309,9 +314,6 @@ class OpenAIContextReasoner:
         for match in matches:
             item = by_term.get(_normalize_term(match["term"]))
             if not isinstance(item, dict):
-                explanations.append(
-                    self._build_dictionary_explanation(match, _DICTIONARY_WHY)
-                )
                 continue
             why = str(item.get("why_in_context", "")).strip()
             usage_mode = str(item.get("usage_mode", "none")).strip()
@@ -321,9 +323,8 @@ class OpenAIContextReasoner:
                 or usage_mode in {"none", "unclear"}
                 or confidence < self.min_confidence
             ):
-                explanations.append(
-                    self._build_dictionary_explanation(match, _DICTIONARY_WHY)
-                )
+                continue
+            if usage_mode == "literal" and confidence < (self.min_confidence + 0.08):
                 continue
             explanations.append(self._build_dictionary_explanation(match, why))
         return explanations
@@ -336,6 +337,27 @@ class OpenAIContextReasoner:
             return False
         latest_line_normalized = _normalize_term(latest_line)
         if normalized not in latest_line_normalized:
+            return False
+        return True
+
+    def _passes_span_sanity(self, term: str, term_kind: str) -> bool:
+        normalized = _normalize_term(term)
+        words = normalized.split()
+        if not words:
+            return False
+        if len(words) > 2:
+            return False
+        if any(len(word) < 2 for word in words):
+            return False
+        if len(words) == 2 and min(len(word) for word in words) < 4:
+            return False
+        if len(words) == 1 and len(words[0]) < 3:
+            return False
+        if not any(len(word) >= 4 for word in words):
+            return False
+        if term_kind == "common_word" and len(words) == 2:
+            return False
+        if any(not re.fullmatch(r"[0-9a-záéíóúüñ'_-]+", word) for word in words):
             return False
         return True
 
@@ -410,6 +432,11 @@ class OpenAIContextReasoner:
             "Solo puedes marcar un termino si aparece literalmente o casi "
             "literalmente en la ultima frase. "
             "Marca una sola palabra o expresion breve, no una frase completa. "
+            "Evita fragmentos funcionales o sintacticos que suenan incompletos, "
+            "por ejemplo conectores, coletillas, pedazos de oracion o combinaciones "
+            "sin sentido por si solas. "
+            "No marques secuencias como 'haciendo de que', 'de que', 'como que', "
+            "'pero no', ni verbos comunes aislados solo porque el audio los deformo. "
             "Usa la referencia como ejemplos utiles, no como una lista que "
             "debas forzar. "
             "Debes elegir target_generation como una de estas tres: "

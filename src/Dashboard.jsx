@@ -28,10 +28,41 @@ const GEN_COLORS = {
   mixed: "#4b5563",
   unknown: "#4b5563",
 };
-const CHARACTER_NAMES = {
-  gen_z: "Tripp",
-  millennial: "Trevor",
-  boomer: "Tina",
+const CHARACTER_PORTRAITS = {
+  gen_z: ["/assets/tripp.png", "/tripp.png"],
+  millennial: ["/assets/trevor.png", "/trevor.png"],
+  boomer: ["/assets/tina.PNG", "/assets/tina.png", "/tina.png"],
+};
+const CHARACTER_BACKGROUNDS = {
+  gen_z: ["/assets/tripp-bg.png"],
+  millennial: ["/assets/trevor-bg.png"],
+  boomer: ["/assets/tina-bg.png"],
+};
+const CHARACTER_FRAMING = {
+  gen_z: {
+    width: "108%",
+    height: "154%",
+    right: "-16%",
+    bottom: "-40%",
+    objectFit: "cover",
+    objectPosition: "right bottom",
+  },
+  millennial: {
+    width: "116%",
+    height: "176%",
+    left: "50%",
+    bottom: "-20%",
+    transform: "translateX(-50%)",
+    objectPosition: "center bottom",
+  },
+  boomer: {
+    width: "125%",
+    height: "197%",
+    left: "41%",
+    bottom: "-29%",
+    transform: "translateX(-50%)",
+    objectPosition: "center bottom",
+  },
 };
 
 function sanitizeFlags(flags) {
@@ -148,6 +179,55 @@ function renderAudioBars(level) {
     const active = level >= (index + 1) * 20;
     return <span key={index} style={audioBar(active)} />;
   });
+}
+
+function CharacterPortrait({ generation }) {
+  const portraitCandidates = CHARACTER_PORTRAITS[generation] ?? [];
+  const backgroundCandidates = CHARACTER_BACKGROUNDS[generation] ?? [];
+  const [portraitIndex, setPortraitIndex] = useState(0);
+  const [backgroundIndex, setBackgroundIndex] = useState(0);
+  const portraitSrc = portraitCandidates[portraitIndex];
+  const backgroundSrc = backgroundCandidates[backgroundIndex];
+  const showPortrait = Boolean(portraitSrc);
+  const showBackground = Boolean(backgroundSrc);
+  const isWaiting = !generation;
+  const framing = CHARACTER_FRAMING[generation] ?? {};
+
+  return (
+    <div style={portraitShell(generation)}>
+      {showBackground && (
+        <img
+          src={backgroundSrc}
+          alt=""
+          aria-hidden="true"
+          style={portraitBackground}
+          onError={() => {
+            setBackgroundIndex((current) => {
+              if (current >= backgroundCandidates.length - 1) return backgroundCandidates.length;
+              return current + 1;
+            });
+          }}
+        />
+      )}
+      <div style={portraitShade(generation)} />
+      {showPortrait ? (
+        <img
+          src={portraitSrc}
+          alt=""
+          aria-hidden="true"
+          style={portraitImage(framing)}
+          onError={() => {
+            setPortraitIndex((current) => {
+              if (current >= portraitCandidates.length - 1) return portraitCandidates.length;
+              return current + 1;
+            });
+          }}
+        />
+      ) : (
+        <div style={portraitFallback(generation, isWaiting)} />
+      )}
+    </div>
+  );
 }
 
 async function pushPreset(preset) {
@@ -402,15 +482,11 @@ export function Dashboard() {
     const interval = window.setInterval(() => {
       const now = Date.now();
       setLines((prev) => {
-        let changed = false;
-        const next = prev.map((line) => {
-          if (!line.provisional || now - (line.updatedAt ?? now) < PROVISIONAL_SETTLE_MS) {
-            return line;
-          }
-          changed = true;
-          return { ...line, provisional: false, sourceId: null };
+        const next = prev.filter((line) => {
+          if (!line.provisional) return true;
+          return now - (line.updatedAt ?? now) < PROVISIONAL_SETTLE_MS * 5;
         });
-        return changed ? next : prev;
+        return next.length === prev.length ? prev : next;
       });
     }, 400);
 
@@ -452,7 +528,6 @@ export function Dashboard() {
   const panelExplanation = selectedFlag ? selectedExplanation : activeExplanation;
   const bannerGeneration =
     selectedFlag?.flag.generation ?? panelExplanation?.target_generation ?? null;
-  const bannerName = bannerGeneration ? (CHARACTER_NAMES[bannerGeneration] ?? "") : "";
   const activeLineId = selectedFlag?.lineId ?? panelExplanation?.line_id ?? null;
   const paragraphs = useMemo(() => buildParagraphs(lines), [lines]);
   const layout = useMemo(
@@ -553,34 +628,47 @@ export function Dashboard() {
           <aside style={sidePanel(compact)} className="angle-lads-scroll">
             <div style={sideRail(compact)}>
               <section style={heroCard(bannerGeneration)}>
-                <p style={bannerNameStyle(bannerGeneration)}>{bannerName || "En espera"}</p>
-                <p style={heroNote}>
-                  {selectedFlag ? "Detalle fijado desde el transcript." : PRESETS[preset]?.note}
-                </p>
-                {selectedFlag && !selectedExplanation && (
-                  <>
-                    <div style={heroMetaRow}>
-                      <span style={termTag(selectedFlag.flag.generation)}>
-                        {selectedFlag.flag.term}
-                      </span>
-                      <span style={entryMeta}>{selectedFlag.flag.generation}</span>
-                    </div>
-                    <p style={heroDefinition}>{selectedFlag.flag.definition}</p>
-                  </>
+                <CharacterPortrait
+                  key={bannerGeneration || "waiting"}
+                  generation={bannerGeneration}
+                />
+                {!selectedFlag && !panelExplanation && (
+                  <div style={heroEmptyState}>
+                    <p style={heroEmptyEyebrow}>Sin término activo</p>
+                    <p style={heroEmptyCopy}>
+                      El personaje aparecerá con generación y confianza cuando detectemos una
+                      expresión que valga la pena explicar.
+                    </p>
+                  </div>
                 )}
-                {panelExplanation && (
-                  <>
-                    <div style={heroMetaRow}>
-                      <span style={termTag(panelExplanation.target_generation)}>
-                        {panelExplanation.term}
-                      </span>
-                      <span style={entryMeta}>
-                        {panelExplanation.target_generation} ·{" "}
-                        {(panelExplanation.confidence * 100).toFixed(0)}%
-                      </span>
-                    </div>
-                    <p style={heroDefinition}>{panelExplanation.definition}</p>
-                  </>
+                {(selectedFlag || panelExplanation) && (
+                  <div style={heroBody}>
+                    {selectedFlag && !selectedExplanation && (
+                      <>
+                        <div style={heroMetaRow}>
+                          <span style={termTag(selectedFlag.flag.generation)}>
+                            {selectedFlag.flag.term}
+                          </span>
+                          <span style={entryMeta}>{selectedFlag.flag.generation}</span>
+                        </div>
+                        <p style={heroDefinition}>{selectedFlag.flag.definition}</p>
+                      </>
+                    )}
+                    {panelExplanation && (
+                      <>
+                        <div style={heroMetaRow}>
+                          <span style={termTag(panelExplanation.target_generation)}>
+                            {panelExplanation.term}
+                          </span>
+                          <span style={entryMeta}>
+                            {panelExplanation.target_generation} ·{" "}
+                            {(panelExplanation.confidence * 100).toFixed(0)}%
+                          </span>
+                        </div>
+                        <p style={heroDefinition}>{panelExplanation.definition}</p>
+                      </>
+                    )}
+                  </div>
                 )}
               </section>
 
@@ -588,7 +676,6 @@ export function Dashboard() {
                 <div style={contextHead}>
                   <div>
                     <p style={panelTitle}>Contexto</p>
-                    <p style={presetNote}>{PRESETS[preset]?.note}</p>
                   </div>
                   <div style={contextNav}>
                     <button
@@ -764,13 +851,28 @@ const bodyGrid = {
   minHeight: 0,
 };
 
-const bannerNameStyle = (generation) => ({
+const heroBody = {
+  padding: "8px 18px 20px",
+};
+
+const heroEmptyState = {
+  padding: "16px 18px 20px",
+};
+
+const heroEmptyEyebrow = {
   margin: 0,
-  fontSize: 34,
-  lineHeight: 0.95,
+  fontSize: 12,
+  color: COLORS.text,
   letterSpacing: TRACKING,
-  color: GEN_COLORS[generation] || COLORS.text,
-});
+};
+
+const heroEmptyCopy = {
+  margin: "8px 0 0 0",
+  fontSize: 14,
+  lineHeight: 1.55,
+  color: COLORS.muted,
+  letterSpacing: TRACKING,
+};
 
 const transcriptShell = {
   position: "relative",
@@ -855,19 +957,72 @@ const sideRail = (compact) => ({
 });
 
 const heroCard = (generation) => ({
-  padding: "18px 18px 20px",
   border: `1px solid ${COLORS.border}`,
   background: COLORS.panel,
   color: GEN_COLORS[generation] || COLORS.text,
+  overflow: "hidden",
 });
 
-const heroNote = {
-  margin: "8px 0 0 0",
-  fontSize: 13,
-  lineHeight: 1.55,
-  color: COLORS.muted,
-  letterSpacing: TRACKING,
+const portraitShell = (generation) => ({
+  position: "relative",
+  width: "100%",
+  aspectRatio: "1.8 / 1",
+  overflow: "hidden",
+  borderBottom: `1px solid ${COLORS.border}`,
+  background:
+    generation && GEN_COLORS[generation]
+      ? `linear-gradient(145deg, ${GEN_COLORS[generation]}22 0%, rgba(17,24,39,0.08) 100%)`
+      : COLORS.background,
+});
+
+const portraitBackground = {
+  position: "absolute",
+  inset: 0,
+  width: "100%",
+  height: "100%",
+  objectFit: "cover",
+  filter: "saturate(0.92) contrast(1.02)",
+  transform: "scale(1.02)",
 };
+
+const portraitShade = (generation) => ({
+  position: "absolute",
+  inset: 0,
+  background:
+    generation && GEN_COLORS[generation]
+      ? `linear-gradient(180deg, rgba(248,246,242,0.06) 0%, ${GEN_COLORS[generation]}12 100%)`
+      : "linear-gradient(180deg, rgba(248,246,242,0.06) 0%, rgba(17,24,39,0.08) 100%)",
+});
+
+const portraitImage = (framing) => ({
+  position: "absolute",
+  left: framing.left,
+  right: framing.right,
+  bottom: framing.bottom ?? 0,
+  width: framing.width ?? "64%",
+  height: framing.height ?? "94%",
+  objectFit: framing.objectFit ?? "contain",
+  objectPosition: framing.objectPosition ?? "center bottom",
+  transform: framing.transform,
+  filter: "drop-shadow(0 18px 30px rgba(17,24,39,0.18)) saturate(0.98) contrast(1.02)",
+});
+
+const portraitFallback = (generation, isWaiting) => ({
+  position: "absolute",
+  inset: 0,
+  width: "100%",
+  height: "100%",
+  display: "grid",
+  placeItems: "center",
+  fontSize: 30,
+  letterSpacing: TRACKING,
+  color: GEN_COLORS[generation] || COLORS.text,
+  background:
+    generation && GEN_COLORS[generation]
+      ? `linear-gradient(145deg, rgba(255,255,255,0.72) 0%, ${GEN_COLORS[generation]}18 100%)`
+      : "linear-gradient(180deg, rgba(248,246,242,0.96) 0%, rgba(232,227,218,0.7) 100%)",
+  opacity: isWaiting ? 0.65 : 1,
+});
 
 const heroMetaRow = {
   display: "flex",
@@ -875,7 +1030,7 @@ const heroMetaRow = {
   justifyContent: "space-between",
   gap: 10,
   flexWrap: "wrap",
-  marginTop: 16,
+  marginTop: 12,
 };
 
 const heroDefinition = {
@@ -907,14 +1062,6 @@ const panelTitle = {
   fontSize: 13,
   color: COLORS.text,
   letterSpacing: TRACKING,
-};
-
-const presetNote = {
-  margin: "4px 0 0 0",
-  fontSize: 12,
-  color: COLORS.muted,
-  letterSpacing: TRACKING,
-  lineHeight: 1.45,
 };
 
 const contextNav = {

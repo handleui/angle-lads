@@ -7,7 +7,6 @@ import random
 from websockets.asyncio.client import connect
 
 import config
-import detector
 
 _REALTIME_URL = "wss://api.openai.com/v1/realtime?intent=transcription"
 _RECONNECT_BASE_SECONDS = 0.25
@@ -19,27 +18,28 @@ _CURRENT_VAD_THRESHOLD = config.OPENAI_REALTIME_VAD_THRESHOLD
 _CURRENT_PREFIX_PADDING_MS = config.OPENAI_REALTIME_PREFIX_PADDING_MS
 _CURRENT_SILENCE_MS = config.OPENAI_REALTIME_SILENCE_MS
 _CURRENT_OPTIMISTIC_FINAL_MS = config.OPENAI_REALTIME_OPTIMISTIC_FINAL_MS
+_NEGOTIATED_PROTOCOL: str | None = None
 _PRESETS = {
     "cafe": {
         "vad_mode": "server_vad",
         "vad_threshold": 0.52,
         "prefix_padding_ms": 220,
         "silence_ms": 420,
-        "optimistic_final_ms": 900,
+        "optimistic_final_ms": 0,
     },
     "privado": {
         "vad_mode": "server_vad",
         "vad_threshold": 0.48,
         "prefix_padding_ms": 240,
         "silence_ms": 460,
-        "optimistic_final_ms": 900,
+        "optimistic_final_ms": 0,
     },
     "focus": {
         "vad_mode": "server_vad",
         "vad_threshold": 0.5,
         "prefix_padding_ms": 220,
         "silence_ms": 380,
-        "optimistic_final_ms": 700,
+        "optimistic_final_ms": 0,
     },
 }
 
@@ -74,6 +74,7 @@ def run(on_transcript, audio_chunks, on_status=None):
 
 
 async def _run_forever(on_transcript, audio_chunks, on_status):
+    global _NEGOTIATED_PROTOCOL
     audio_iter = iter(audio_chunks)
     attempts = 0
     last_failure_at = 0.0
@@ -86,6 +87,17 @@ async def _run_forever(on_transcript, audio_chunks, on_status):
             _emit_status(on_status, "stopped", "audio stream ended")
             return
         except Exception as exc:
+            if (
+                _should_try_legacy_fallback(exc)
+                and _NEGOTIATED_PROTOCOL != "legacy"
+            ):
+                _NEGOTIATED_PROTOCOL = "legacy"
+                _emit_status(
+                    on_status,
+                    "reconnecting",
+                    "Falling back to legacy transcription session protocol",
+                )
+                continue
             now = asyncio.get_running_loop().time()
             if (
                 not last_failure_at
@@ -120,18 +132,25 @@ async def _run(on_transcript, audio_iter, on_status):
     optimistic_tasks: dict[str, asyncio.Task] = {}
     latest_partial = {"item_id": None}
 
+    protocol = _selected_protocol()
     async with connect(url, additional_headers=headers, max_size=2**24) as ws:
         _emit_status(on_status, "connecting", None)
         await ws.send(
             json.dumps(
                 {
-                    "type": "transcription_session.update",
-                    "session": _session_config(),
+                    **_session_update_event(protocol),
                 }
             )
         )
-        await _await_session_ready(ws)
-        _emit_status(on_status, "connected", None)
+        session_ready = await _await_session_ready(ws)
+        if session_ready:
+            _emit_status(on_status, "connected", None)
+        else:
+            _emit_status(
+                on_status,
+                "connected",
+                "session ack timeout; continuing stream",
+            )
 
         receiver = asyncio.create_task(
             _receive_loop(
@@ -241,13 +260,17 @@ async def _receive_loop(
                     "text": text,
                     "avg_logprob": _average_logprob(message.get("logprobs")),
                 }
-                _flush_completed(
-                    ordered_items,
-                    completed_items,
-                    emitted_items,
-                    on_transcript,
-                    on_status,
-                )
+            else:
+                # Empty completed items are valid (e.g. brief noise segments). Mark
+                # them as emitted so ordered flushing cannot stall future finals.
+                emitted_items.add(item_id)
+            _flush_completed(
+                ordered_items,
+                completed_items,
+                emitted_items,
+                on_transcript,
+                on_status,
+            )
             continue
 
         if event_type == "input_audio_buffer.speech_started":
@@ -270,7 +293,34 @@ async def _receive_loop(
 
 
 def _session_config():
+    protocol = _selected_protocol()
+    if protocol == "legacy":
+        return _session_config_legacy()
+    return _session_config_modern()
+
+
+def _session_config_modern():
     session = {
+        "type": "transcription",
+        "audio": {
+            "input": {
+                "format": {"type": "audio/pcm", "rate": config.OPENAI_AUDIO_RATE},
+                "noise_reduction": {"type": "near_field"},
+                "transcription": {
+                    "model": config.OPENAI_REALTIME_MODEL,
+                    "language": config.OPENAI_REALTIME_LANGUAGE,
+                    "prompt": _transcription_prompt(),
+                },
+                "turn_detection": _turn_detection_config(),
+            }
+        },
+        "include": ["item.input_audio_transcription.logprobs"],
+    }
+    return session
+
+
+def _session_config_legacy():
+    return {
         "input_audio_format": "pcm16",
         "input_audio_noise_reduction": {"type": "near_field"},
         "input_audio_transcription": {
@@ -281,7 +331,6 @@ def _session_config():
         "turn_detection": _turn_detection_config(),
         "include": ["item.input_audio_transcription.logprobs"],
     }
-    return session
 
 
 def _turn_detection_config():
@@ -363,13 +412,26 @@ def _flush_completed(
         )
 
 
-async def _await_session_ready(ws):
+async def _await_session_ready(ws, timeout_seconds: float = 8.0) -> bool:
+    saw_created = False
     while True:
-        message = json.loads(await ws.recv())
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            if saw_created:
+                # Some transcription-session flows only emit `*.created`. Do not
+                # block audio streaming indefinitely waiting for `*.updated`.
+                return True
+            # Flow-safe fallback: continue streaming audio and let receive loop
+            # surface server-side errors instead of deadlocking startup.
+            return False
+
+        message = json.loads(raw)
         event_type = str(message.get("type", ""))
-        if event_type in {"transcription_session.updated", "session.updated"}:
-            return
-        if event_type in {"transcription_session.created", "session.created"}:
+        if event_type.endswith(".updated") and "session" in event_type:
+            return True
+        if event_type.endswith(".created") and "session" in event_type:
+            saw_created = True
             continue
         if event_type == "error":
             error = message.get("error", {})
@@ -377,6 +439,45 @@ async def _await_session_ready(ws):
                 error.get("message") or error.get("code") or "OpenAI realtime error"
             )
             raise RuntimeError(str(detail))
+
+
+def _selected_protocol() -> str:
+    if _NEGOTIATED_PROTOCOL:
+        return _NEGOTIATED_PROTOCOL
+    configured = config.OPENAI_REALTIME_PROTOCOL
+    if configured in {"modern", "legacy"}:
+        return configured
+    return "modern"
+
+
+def _session_update_event(protocol: str) -> dict:
+    if protocol == "legacy":
+        return {
+            "type": "transcription_session.update",
+            "session": _session_config_legacy(),
+        }
+    return {
+        "type": "session.update",
+        "session": _session_config_modern(),
+    }
+
+
+def _should_try_legacy_fallback(exc: Exception) -> bool:
+    configured = config.OPENAI_REALTIME_PROTOCOL
+    if configured not in {"auto", ""}:
+        return False
+    text = str(exc).lower()
+    if isinstance(exc, TimeoutError):
+        return True
+    hints = (
+        "session",
+        "unknown",
+        "invalid",
+        "unrecognized",
+        "transcription_session",
+        "session.update",
+    )
+    return any(hint in text for hint in hints)
 
 
 def _emit_status(on_status, event: str, detail: str | None):
@@ -400,18 +501,14 @@ def _average_logprob(logprobs) -> float | None:
 
 def _transcription_prompt() -> str:
     custom_prompt = config.OPENAI_REALTIME_TRANSCRIPTION_PROMPT.strip()
-    hints = detector.transcription_prompt(config.OPENAI_REALTIME_HINT_TERMS)
     parts = [
         "Transcribe audio exactly as spoken.",
-        "Do not translate or switch languages.",
-        "Prefer Mexican Spanish and common Spanglish spellings.",
-        "Multiple speakers may appear; transcribe whatever is clearly audible.",
-        "Do not wait for perfect full sentences before stabilizing what you can hear.",
-        "If audio is unclear, keep the transcript conservative instead of "
-        "inventing words.",
+        "Do not invent dialogue, complete thoughts, or paraphrase missing audio.",
+        "Do not translate or switch languages unless the speaker did.",
+        "Prefer Mexican Spanish and common Spanglish spellings when clearly heard.",
+        "If audio is unclear, keep the transcript conservative and partial.",
+        "Do not transcribe instructions, prompts, keyword lists, or metadata as speech.",
     ]
     if custom_prompt:
         parts.append(custom_prompt)
-    if hints:
-        parts.append(f"Keyword hints: {hints}")
     return " ".join(parts)

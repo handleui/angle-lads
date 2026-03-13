@@ -41,6 +41,7 @@ Latency and counters are available at `http://localhost:8000/metrics`.
 ## Docs
 
 - [Generation targeting](docs/generation-targeting.md)
+- [Common fixes](docs/common-fixes.md)
 
 ## Interface
 
@@ -55,7 +56,7 @@ Copy `.env.example` to `.env` and add `OPENAI_API_KEY`.
 
 Optional tuning:
 
-- `OPENAI_REALTIME_MODEL` (default: `gpt-4o-mini-transcribe`)
+- `OPENAI_REALTIME_MODEL` (default: `gpt-4o-transcribe`)
 - `OPENAI_REALTIME_LANGUAGE`
 - `OPENAI_REALTIME_TRANSCRIPTION_PROMPT`
 - `OPENAI_REALTIME_HINT_TERMS`
@@ -64,6 +65,7 @@ Optional tuning:
 - `OPENAI_REALTIME_VAD_THRESHOLD`
 - `OPENAI_REALTIME_PREFIX_PADDING_MS`
 - `OPENAI_REALTIME_SILENCE_MS`
+- `OPENAI_REALTIME_PROTOCOL` (default: `auto`; options: `auto`, `modern`, `legacy`)
 - `OPENAI_REALTIME_OPTIMISTIC_FINAL_MS`
 - `OPENAI_EXPLANATION_MODEL` (default: `gpt-4.1-mini`)
 - `OPENAI_EXPLANATION_TIMEOUT_SECONDS`
