@@ -70,6 +70,7 @@ pipeline_state = {
     "explanation_provider": "openai",
     "preset": "cafe",
     "audio_input_device": None,
+    "audio_muted": False,
 }
 AI_QUEUE_MAXSIZE = 8
 line_id_lock = threading.Lock()
@@ -149,6 +150,10 @@ _TRANSCRIPTION_INJECTION_MARKERS = (
 
 class PresetPayload(BaseModel):
     preset: str
+
+
+class MutePayload(BaseModel):
+    muted: bool
 
 
 def _apply_preset(preset: str) -> str:
@@ -455,17 +460,21 @@ def tracked_audio_stream(rate: int, chunk_size: int):
         rms_level = (rms / 32767) ** 0.3 if rms else 0.0
         normalized_level = min(100, int(max(peak_level, rms_level) * 100))
         with metrics_lock:
+            muted = bool(pipeline_state["audio_muted"])
             pipeline_state["audio_chunks_sent"] += 1
             pipeline_state["last_event_at"] = time.time()
             previous_level = pipeline_state["audio_level"]
-            if normalized_level >= previous_level:
-                smoothed_level = int((previous_level * 0.4) + (normalized_level * 0.6))
+            target_level = 0 if muted else normalized_level
+            if target_level >= previous_level:
+                smoothed_level = int((previous_level * 0.4) + (target_level * 0.6))
             else:
+                # Slightly faster decay when muted so UI reflects silence quickly.
+                decay = 0.34 if muted else 0.18
                 smoothed_level = int(
-                    (previous_level * 0.82) + (normalized_level * 0.18)
+                    (previous_level * (1.0 - decay)) + (target_level * decay)
                 )
             pipeline_state["audio_level"] = max(0, min(100, smoothed_level))
-        yield chunk
+        yield bytes(len(chunk)) if muted else chunk
 
 
 def _build_flags(text: str, explanation: dict) -> list[dict]:
@@ -626,6 +635,7 @@ def pipeline_thread():
         pipeline_state["ai_queue_depth"] = 0
         pipeline_state["ai_error"] = None
         pipeline_state["audio_input_device"] = None
+        pipeline_state["audio_muted"] = False
 
     try:
         print("Opening microphone…")
@@ -711,6 +721,15 @@ async def metrics():
 async def set_preset(payload: PresetPayload):
     preset = payload.preset.strip().lower()
     return {"preset": _apply_preset(preset)}
+
+
+@app.post("/mute")
+async def set_mute(payload: MutePayload):
+    with metrics_lock:
+        pipeline_state["audio_muted"] = bool(payload.muted)
+        if pipeline_state["audio_muted"]:
+            pipeline_state["audio_level"] = 0
+    return {"muted": bool(payload.muted)}
 
 
 @app.websocket("/ws")

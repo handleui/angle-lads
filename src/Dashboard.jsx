@@ -4,6 +4,7 @@ import { PRESETS, usePresetStore } from "./presetStore";
 const WS_URL = "ws://localhost:8000/ws";
 const METRICS_URL = "http://localhost:8000/metrics";
 const PRESET_URL = "http://localhost:8000/preset";
+const MUTE_URL = "http://localhost:8000/mute";
 const RECONNECT_DELAY_MS = 1000;
 const WS_HEARTBEAT_MS = 15000;
 const METRICS_POLL_MS = 200;
@@ -174,9 +175,9 @@ function getStatusColor(connected, pipelineError) {
   return "#16a34a";
 }
 
-function renderAudioBars(level) {
+function renderAudioBars(level, muted) {
   return [0, 1, 2, 3, 4].map((index) => {
-    const active = level >= (index + 1) * 20;
+    const active = !muted && level >= (index + 1) * 20;
     return <span key={index} style={audioBar(active)} />;
   });
 }
@@ -243,6 +244,19 @@ async function pushPreset(preset) {
   return typeof data?.preset === "string" ? data.preset : preset;
 }
 
+async function pushMute(muted) {
+  const res = await fetch(MUTE_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ muted }),
+  });
+  if (!res.ok) {
+    throw new Error(`mute returned ${res.status}`);
+  }
+  const data = await res.json();
+  return Boolean(data?.muted);
+}
+
 export function Dashboard() {
   const [lines, setLines] = useState([]);
   const [interim, setInterim] = useState("");
@@ -258,6 +272,9 @@ export function Dashboard() {
   const [selectedFlag, setSelectedFlag] = useState(null);
   const [compact, setCompact] = useState(() => window.innerWidth < 980);
   const [presetSyncError, setPresetSyncError] = useState("");
+  const [muteSyncError, setMuteSyncError] = useState("");
+  const [isMuted, setIsMuted] = useState(false);
+  const [mutePending, setMutePending] = useState(false);
   const endRef = useRef(null);
   const transcriptRef = useRef(null);
   const stickToBottomRef = useRef(true);
@@ -460,6 +477,9 @@ export function Dashboard() {
         setPipelineError(typeof error === "string" ? error : "");
         setPipelineState(data.pipeline ?? null);
         setAudioLevel(data.pipeline?.audio_level ?? 0);
+        if (typeof data.pipeline?.audio_muted === "boolean") {
+          setIsMuted(data.pipeline.audio_muted);
+        }
       } catch {
         if (cancelled) return;
         setPipelineError("");
@@ -533,6 +553,7 @@ export function Dashboard() {
     hour: "2-digit",
     minute: "2-digit",
   });
+  const shownAudioLevel = isMuted ? 0 : displayAudioLevel;
 
   const activeExplanation = explanations[activeExplanationIndex] ?? null;
   const selectedExplanation =
@@ -557,6 +578,23 @@ export function Dashboard() {
     if (explanationIndex >= 0) {
       explanationShownAtRef.current = Date.now();
       setActiveExplanationIndex(explanationIndex);
+    }
+  };
+
+  const toggleMute = async () => {
+    if (mutePending) return;
+    const nextMuted = !isMuted;
+    setMutePending(true);
+    setMuteSyncError("");
+    setIsMuted(nextMuted);
+    try {
+      const confirmedMuted = await pushMute(nextMuted);
+      setIsMuted(confirmedMuted);
+    } catch {
+      setIsMuted(!nextMuted);
+      setMuteSyncError("No se pudo sincronizar el mute.");
+    } finally {
+      setMutePending(false);
     }
   };
 
@@ -592,19 +630,29 @@ export function Dashboard() {
             </div>
           </div>
           <div style={statusRail}>
-            <div
-              role="img"
-              style={audioMeter}
-              aria-label={`nivel de audio ${Math.round(displayAudioLevel)}`}
+            <button
+              type="button"
+              style={audioMeter(isMuted, mutePending)}
+              aria-label={
+                isMuted
+                  ? "microfono silenciado, click para activar"
+                  : "microfono activo, click para silenciar"
+              }
+              title={
+                isMuted ? "Mic muted · click para activar" : "Mic activo · click para silenciar"
+              }
+              onClick={toggleMute}
+              disabled={mutePending}
             >
-              {renderAudioBars(displayAudioLevel)}
-            </div>
+              {renderAudioBars(shownAudioLevel, isMuted)}
+            </button>
             {!connected && <p style={statusText}>{connectionError}</p>}
           </div>
         </header>
 
         {pipelineError && <p style={errorText}>error del pipeline · {pipelineError}</p>}
         {presetSyncError && <p style={errorText}>{presetSyncError}</p>}
+        {muteSyncError && <p style={errorText}>{muteSyncError}</p>}
 
         <div style={layout}>
           <section style={transcriptShell}>
@@ -837,11 +885,18 @@ const statusText = {
   textAlign: "right",
 };
 
-const audioMeter = {
+const audioMeter = (muted, pending) => ({
   display: "flex",
   alignItems: "flex-end",
   gap: 4,
-};
+  border: 0,
+  background: muted ? "rgba(17,24,39,0.06)" : "transparent",
+  borderRadius: 999,
+  padding: "4px 8px",
+  margin: 0,
+  cursor: pending ? "wait" : "pointer",
+  opacity: pending ? 0.7 : 1,
+});
 
 const audioBar = (active) => ({
   width: 3,
