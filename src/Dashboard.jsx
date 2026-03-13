@@ -239,6 +239,8 @@ async function pushPreset(preset) {
   if (!res.ok) {
     throw new Error(`preset returned ${res.status}`);
   }
+  const data = await res.json();
+  return typeof data?.preset === "string" ? data.preset : preset;
 }
 
 export function Dashboard() {
@@ -264,6 +266,7 @@ export function Dashboard() {
   const preset = usePresetStore((state) => state.preset);
   const hydrated = usePresetStore((state) => state.hydrated);
   const setPreset = usePresetStore((state) => state.setPreset);
+  const validPresetKeys = useMemo(() => new Set(Object.keys(PRESETS)), []);
 
   const upsertFinalLine = useEffectEvent((msg) => {
     setLines((prev) => {
@@ -414,10 +417,21 @@ export function Dashboard() {
 
   useEffect(() => {
     if (!hydrated) return;
+    if (typeof preset !== "string" || !validPresetKeys.has(preset)) {
+      setPreset("cafe");
+      return;
+    }
+    if (!connected) {
+      setPresetSyncError("");
+      return;
+    }
     let cancelled = false;
     pushPreset(preset)
-      .then(() => {
+      .then((serverPreset) => {
         if (!cancelled) {
+          if (serverPreset !== preset && validPresetKeys.has(serverPreset)) {
+            setPreset(serverPreset);
+          }
           setPresetSyncError("");
         }
       })
@@ -429,7 +443,7 @@ export function Dashboard() {
     return () => {
       cancelled = true;
     };
-  }, [hydrated, preset]);
+  }, [connected, hydrated, preset, setPreset, validPresetKeys]);
 
   useEffect(() => {
     let cancelled = false;

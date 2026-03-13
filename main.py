@@ -409,9 +409,6 @@ def _is_low_confidence_transcript(
 
 
 def on_pipeline_status(event: str, detail: str | None):
-    if event in {"connecting", "connected", "reconnecting", "stopped"}:
-        suffix = f" ({detail})" if detail else ""
-        print(f"[transcriber:{event}]{suffix}")
     with metrics_lock:
         pipeline_state["last_event_at"] = time.time()
 
